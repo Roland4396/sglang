@@ -216,8 +216,14 @@ class TestSubBlockSparseBackend(unittest.TestCase):
             torch.tensor([[[[1, 3, 5, 7]]]], dtype=torch.int32),
         )
         self.assertEqual(captured["mask_block_cnt"].item(), 4)
-        self.assertIsNone(captured["full_block_cnt"])
-        self.assertIsNone(captured["full_block_idx"])
+        torch.testing.assert_close(
+            captured["full_block_cnt"],
+            torch.zeros_like(captured["mask_block_cnt"]),
+        )
+        torch.testing.assert_close(
+            captured["full_block_idx"],
+            torch.zeros_like(captured["mask_block_idx"]),
+        )
         self.assertEqual(captured["block_size"], (64, 64))
         self.assertIs(
             captured["block_sparse_tensors"].mask_block_idx,
