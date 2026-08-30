@@ -406,6 +406,10 @@ def try_load_rank_local_tp_state_dict(
         set(meta_sd),
     )
     if checkpoint_sources is None:
+        logger.info(
+            "Falling back from rank-local TP checkpoint loading: "
+            "checkpoint metadata is corrupt or contains duplicate tensor keys"
+        )
         return None
     sources_by_target, reverse_param_names_mapping = checkpoint_sources
 
@@ -414,6 +418,12 @@ def try_load_rank_local_tp_state_dict(
     for target_param_name, sources in sources_by_target.items():
         meta_param = meta_sd.get(target_param_name)
         if meta_param is None or isinstance(meta_param, dist_tensor.DTensor):
+            logger.info(
+                "Falling back from rank-local TP checkpoint loading for %s: "
+                "destination parameter is %s",
+                target_param_name,
+                "missing" if meta_param is None else "a DTensor",
+            )
             return None
         source_uses_quantized_dtype = any(
             source.dtype in _QUANTIZED_SAFETENSORS_DTYPES for source in sources
@@ -426,6 +436,13 @@ def try_load_rank_local_tp_state_dict(
             if meta_param.dtype != torch.float8_e4m3fn or any(
                 source.dtype != "F8_E4M3" for source in sources
             ):
+                logger.info(
+                    "Falling back from rank-local TP checkpoint loading for %s: "
+                    "unsupported quantized dtype combination destination=%s sources=%s",
+                    target_param_name,
+                    meta_param.dtype,
+                    sorted({source.dtype for source in sources}),
+                )
                 return None
 
         actual_param = get_param_for_weight_loading(
@@ -449,8 +466,26 @@ def try_load_rank_local_tp_state_dict(
             else:
                 supported, shard_dim = _resolve_tp_shard_dim(actual_param)
         if not supported:
+            logger.info(
+                "Falling back from rank-local TP checkpoint loading for %s: "
+                "unsupported weight loader %s",
+                target_param_name,
+                type(actual_param.__dict__.get("weight_loader")).__name__
+                if actual_param is not None
+                else "missing parameter",
+            )
             return None
-        if tp_local_shape(sources, shard_dim, tp_size) != tuple(meta_param.shape):
+        expected_local_shape = tp_local_shape(sources, shard_dim, tp_size)
+        if expected_local_shape != tuple(meta_param.shape):
+            logger.info(
+                "Falling back from rank-local TP checkpoint loading for %s: "
+                "local shape mismatch checkpoint=%s destination=%s shard_dim=%s tp_size=%d",
+                target_param_name,
+                expected_local_shape,
+                tuple(meta_param.shape),
+                shard_dim,
+                tp_size,
+            )
             return None
         shard_dims[target_param_name] = shard_dim
 
