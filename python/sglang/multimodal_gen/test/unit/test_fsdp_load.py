@@ -366,3 +366,87 @@ class TestRankLocalSafetensorsRead(unittest.TestCase):
             self.assertEqual(
                 rank_local_checkpoint.tp_local_shape(sources, 1, 2), (8, 2)
             )
+
+    def test_reads_transformed_fp8_tp_local_slice(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            file_path = str(Path(temp_dir) / "model.safetensors")
+            weight = torch.arange(12, dtype=torch.float32).reshape(6, 2).to(
+                torch.float8_e4m3fn
+            )
+            save_file({"weight": weight}, file_path)
+            source = rank_local_checkpoint.SafetensorsSource(
+                file_path=file_path,
+                param_name="weight",
+                shape=(6, 2),
+                dtype="F8_E4M3",
+                merge_index=None,
+                num_params_to_merge=None,
+            )
+
+            def reverse_rows(tensor: torch.Tensor) -> torch.Tensor:
+                return tensor.flip(0)
+
+            with safe_open(file_path, framework="pt", device="cpu") as handle:
+                tensor = rank_local_checkpoint.read_tp_local_tensor(
+                    [source],
+                    {file_path: handle},
+                    shard_dim=0,
+                    tp_rank=1,
+                    tp_size=2,
+                    transform=reverse_rows,
+                )
+
+            expected = reverse_rows(weight)[3:6]
+            torch.testing.assert_close(tensor, expected)
+            self.assertEqual(tensor.dtype, torch.float8_e4m3fn)
+            self.assertEqual(tensor.untyped_storage().nbytes(), expected.nbytes)
+
+    def test_loads_transformed_fp8_tp_state_dict(self):
+        class _TransformedFP8Model(nn.Module):
+            def __init__(self) -> None:
+                super().__init__()
+                self.weight = nn.Parameter(
+                    torch.empty(
+                        (3, 2),
+                        dtype=torch.float8_e4m3fn,
+                        device="meta",
+                    ),
+                    requires_grad=False,
+                )
+                self.weight.output_dim = 0
+                self.weight.rank_local_weight_transform = lambda tensor: tensor.flip(
+                    0
+                )
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            file_path = str(Path(temp_dir) / "model.safetensors")
+            weight = torch.arange(12, dtype=torch.float32).reshape(6, 2).to(
+                torch.float8_e4m3fn
+            )
+            save_file({"weight": weight}, file_path)
+
+            with (
+                patch.object(
+                    rank_local_checkpoint,
+                    "get_tp_world_size",
+                    return_value=2,
+                ),
+                patch.object(rank_local_checkpoint, "get_tp_rank", return_value=1),
+                patch.object(torch.distributed, "get_rank", return_value=1),
+            ):
+                result = rank_local_checkpoint.try_load_rank_local_tp_state_dict(
+                    _TransformedFP8Model(),
+                    [file_path],
+                    lambda name: (name, None, None),
+                )
+
+            self.assertIsNotNone(result)
+            assert result is not None
+            local_state_dict, reverse_mapping = result
+            expected = weight.flip(0)[3:6]
+            torch.testing.assert_close(local_state_dict["weight"].tensor, expected)
+            self.assertEqual(
+                local_state_dict["weight"].tensor.dtype,
+                torch.float8_e4m3fn,
+            )
+            self.assertEqual(reverse_mapping["weight"], ("weight", None, None))

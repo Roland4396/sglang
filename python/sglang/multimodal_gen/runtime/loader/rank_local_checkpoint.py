@@ -318,7 +318,37 @@ def read_tp_local_tensor(
     shard_dim: int | None,
     tp_rank: int,
     tp_size: int,
+    transform: Callable[[torch.Tensor], torch.Tensor] | None = None,
 ) -> torch.Tensor:
+    if transform is not None:
+        global_shape = assembled_source_shape(sources)
+        if global_shape is None:
+            raise RuntimeError("Invalid checkpoint sources for transformed TP parameter")
+        loaded_tensor = read_rank_local_tensor(
+            sources,
+            handles,
+            global_shape,
+            (0,) * len(global_shape),
+        )
+        transformed_tensor = transform(loaded_tensor)
+        if tuple(transformed_tensor.shape) != global_shape:
+            raise RuntimeError(
+                "Rank-local TP checkpoint transform shape mismatch: "
+                f"transformed={tuple(transformed_tensor.shape)}, expected={global_shape}"
+            )
+        if shard_dim is None:
+            return transformed_tensor
+        shard_size = global_shape[shard_dim] // tp_size
+        slices = [slice(None)] * len(global_shape)
+        slices[shard_dim] = slice(
+            tp_rank * shard_size,
+            (tp_rank + 1) * shard_size,
+        )
+        # Clone so the local shard does not retain the full transformed tensor.
+        return transformed_tensor[tuple(slices)].clone(
+            memory_format=torch.contiguous_format
+        )
+
     if shard_dim is None:
         assembled_shape = assembled_source_shape(sources)
         if assembled_shape is None:
@@ -380,14 +410,23 @@ def try_load_rank_local_tp_state_dict(
     sources_by_target, reverse_param_names_mapping = checkpoint_sources
 
     shard_dims: dict[str, int | None] = {}
+    rank_local_transforms: dict[str, Callable[[torch.Tensor], torch.Tensor]] = {}
     for target_param_name, sources in sources_by_target.items():
         meta_param = meta_sd.get(target_param_name)
         if meta_param is None or isinstance(meta_param, dist_tensor.DTensor):
             return None
-        if meta_param.dtype in QUANTIZED_DTYPES:
-            return None
-        if any(source.dtype in _QUANTIZED_SAFETENSORS_DTYPES for source in sources):
-            return None
+        source_uses_quantized_dtype = any(
+            source.dtype in _QUANTIZED_SAFETENSORS_DTYPES for source in sources
+        )
+        if meta_param.dtype in QUANTIZED_DTYPES or source_uses_quantized_dtype:
+            # Native H3 block-FP8 checkpoints have the same serialized dtype as
+            # the destination parameter.  Loading an already-local FP8 slice is
+            # lossless; other quantized encodings may require format-specific
+            # unpacking or dequantization and therefore keep the safe fallback.
+            if meta_param.dtype != torch.float8_e4m3fn or any(
+                source.dtype != "F8_E4M3" for source in sources
+            ):
+                return None
 
         actual_param = get_param_for_weight_loading(
             model,
@@ -397,7 +436,18 @@ def try_load_rank_local_tp_state_dict(
         if actual_param is None:
             supported, shard_dim = True, None
         else:
-            supported, shard_dim = _resolve_tp_shard_dim(actual_param)
+            rank_local_transform = actual_param.__dict__.get(
+                "rank_local_weight_transform"
+            )
+            if rank_local_transform is not None:
+                output_dim = getattr(actual_param, "output_dim", None)
+                input_dim = getattr(actual_param, "input_dim", None)
+                shard_dim = output_dim if output_dim is not None else input_dim
+                supported = shard_dim is not None
+                if supported:
+                    rank_local_transforms[target_param_name] = rank_local_transform
+            else:
+                supported, shard_dim = _resolve_tp_shard_dim(actual_param)
         if not supported:
             return None
         if tp_local_shape(sources, shard_dim, tp_size) != tuple(meta_param.shape):
@@ -421,6 +471,7 @@ def try_load_rank_local_tp_state_dict(
                 shard_dims[target_param_name],
                 tp_rank,
                 tp_size,
+                transform=rank_local_transforms.get(target_param_name),
             )
             local_param_sd[target_param_name] = LocalTPShard(tensor)
             local_bytes += tensor.numel() * tensor.element_size()
