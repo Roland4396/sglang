@@ -239,7 +239,12 @@ def read_rank_local_tensor(
 def _resolve_tp_shard_dim(
     actual_param: torch.nn.Parameter,
 ) -> tuple[bool, int | None]:
-    weight_loader = actual_param.__dict__.get("weight_loader")
+    # Plain ``torch.nn.Parameter`` instances receive ``weight_loader`` and the
+    # shard dimensions as dynamic attributes.  Quantized vLLM-style parameters
+    # expose the same contract through properties backed by ``_weight_loader``,
+    # ``_output_dim`` and ``_input_dim``.  Use the public attributes so native
+    # block-FP8 checkpoints do not silently fall back to full-tensor loading.
+    weight_loader = getattr(actual_param, "weight_loader", None)
     if weight_loader is None:
         return True, None
     if not isinstance(weight_loader, MethodType):
@@ -249,10 +254,10 @@ def _resolve_tp_shard_dim(
     if isinstance(owner, ReplicatedLinear):
         return True, None
     if isinstance(owner, ColumnParallelLinear):
-        output_dim = actual_param.__dict__.get("output_dim")
+        output_dim = getattr(actual_param, "output_dim", None)
         return output_dim is not None, output_dim
     if isinstance(owner, RowParallelLinear):
-        input_dim = actual_param.__dict__.get("input_dim")
+        input_dim = getattr(actual_param, "input_dim", None)
         return True, input_dim
     return False, None
 

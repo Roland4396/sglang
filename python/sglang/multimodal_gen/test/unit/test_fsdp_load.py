@@ -9,12 +9,16 @@ import torch
 from safetensors.torch import safe_open, save_file
 from torch import nn
 
-from sglang.multimodal_gen.runtime.layers.linear import ReplicatedLinear
+from sglang.multimodal_gen.runtime.layers.linear import (
+    ColumnParallelLinear,
+    ReplicatedLinear,
+)
 from sglang.multimodal_gen.runtime.layers.quantization.bitsandbytes import (
     BitsAndBytesConfig,
 )
 from sglang.multimodal_gen.runtime.loader import fsdp_load, rank_local_checkpoint
 from sglang.multimodal_gen.runtime.loader.weight_load_plan import WeightLoadPlan
+from sglang.multimodal_gen.runtime.models.parameter import ModelWeightParameter
 from sglang.srt.layers.quantization.fp8 import Fp8Config
 
 
@@ -251,6 +255,20 @@ class TestRankLocalSafetensorsRead(unittest.TestCase):
                 )
 
             torch.testing.assert_close(tensor, weight[2:4])
+
+    def test_resolves_property_backed_column_parallel_parameter(self):
+        owner = ColumnParallelLinear.__new__(ColumnParallelLinear)
+        parameter = ModelWeightParameter(
+            data=torch.empty((4, 4)),
+            input_dim=1,
+            output_dim=0,
+            weight_loader=owner.weight_loader,
+        )
+
+        self.assertEqual(
+            rank_local_checkpoint._resolve_tp_shard_dim(parameter),
+            (True, 0),
+        )
 
     def test_reads_rank_local_slice_across_merged_sources(self):
         with tempfile.TemporaryDirectory() as temp_dir:
