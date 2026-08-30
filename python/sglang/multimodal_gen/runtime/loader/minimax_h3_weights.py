@@ -27,7 +27,19 @@ def inspect_minimax_h3_safetensors(
 ) -> tuple[tuple[int, int] | None, dict[str, dict[str, Any]]]:
     """Read H3 architecture metadata and Comfy per-layer format markers."""
     adaln_curve_shape = None
-    layer_markers = inspect_comfy_quant_markers(safetensors_list)
+    native_fp8_export = bool(safetensors_list)
+
+    for path in safetensors_list:
+        with safe_open(path, framework="pt", device="cpu") as checkpoint:
+            metadata = checkpoint.metadata() or {}
+            native_fp8_export = native_fp8_export and metadata.get(
+                "h3_fp8_export_format"
+            ) == "h3-fp8-block-128x128-v1"
+
+    layer_markers = inspect_comfy_quant_markers(
+        safetensors_list,
+        allow_native_fp8=native_fp8_export,
+    )
 
     for path in safetensors_list:
         with safe_open(path, framework="pt", device="cpu") as checkpoint:

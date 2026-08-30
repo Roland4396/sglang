@@ -376,6 +376,42 @@ class TestTransformerQuantHelpers(unittest.TestCase):
             {"format": "float8_e4m3fn", "_activation_scheme": "dynamic"},
         )
 
+    def test_inspect_minimax_h3_accepts_native_block_fp8_export(self):
+        with tempfile.NamedTemporaryFile(suffix=".safetensors") as f:
+            save_file(
+                {
+                    "blocks.0.mlp.fc1.weight": torch.ones(
+                        (256, 256), dtype=torch.float8_e4m3fn
+                    ),
+                    "blocks.0.mlp.fc1.weight_scale_inv": torch.ones((2, 2)),
+                },
+                f.name,
+                metadata={
+                    "h3_fp8_export_format": "h3-fp8-block-128x128-v1",
+                },
+            )
+
+            _, layer_markers = inspect_minimax_h3_safetensors([f.name])
+
+        self.assertEqual(layer_markers, {})
+
+    def test_inspect_minimax_h3_rejects_unmarked_fp8_without_native_export(self):
+        with tempfile.NamedTemporaryFile(suffix=".safetensors") as f:
+            save_file(
+                {
+                    "blocks.0.mlp.fc1.weight": torch.ones(
+                        (256, 256), dtype=torch.float8_e4m3fn
+                    ),
+                    "blocks.0.mlp.fc1.weight_scale_inv": torch.ones((2, 2)),
+                },
+                f.name,
+            )
+
+            with self.assertRaisesRegex(
+                ValueError, "missing comfy_quant metadata"
+            ):
+                inspect_minimax_h3_safetensors([f.name])
+
     def test_minimax_h3_comfy_int8_resolves_serialized_kitchen(self):
         config = resolve_minimax_h3_checkpoint_quantization(
             {

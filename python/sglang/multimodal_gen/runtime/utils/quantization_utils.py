@@ -38,6 +38,7 @@ logger = init_logger(__name__)
 def inspect_comfy_quant_markers(
     safetensors_list: list[str],
     param_name_mapper: Callable[[str], str] | None = None,
+    allow_native_fp8: bool = False,
 ) -> dict[str, dict[str, Any]]:
     """Read and validate Comfy's tensor-level quantization markers."""
     checkpoint_meta: dict[str, tuple[str, tuple[int, ...]]] = {}
@@ -128,6 +129,24 @@ def inspect_comfy_quant_markers(
             raw_markers.setdefault(prefix, {"format": "mxfp8"})
 
     missing_markers = marked_dtype_weight_prefixes - raw_markers.keys()
+    if allow_native_fp8:
+        # Native serialized block-FP8 checkpoints use ``weight_scale_inv`` and
+        # a directory-level quantization_config instead of Comfy's per-layer
+        # marker.  Only exempt the exact FP8 + F32 2-D scale layout; INT8/U8
+        # weights and malformed native checkpoints must still fail closed.
+        native_fp8_prefixes = {
+            prefix
+            for prefix in missing_markers
+            if checkpoint_meta[f"{prefix}.weight"][0] == "F8_E4M3"
+            and len(checkpoint_meta[f"{prefix}.weight"][1]) == 2
+            and (
+                scale_meta := checkpoint_meta.get(f"{prefix}.weight_scale_inv")
+            )
+            is not None
+            and scale_meta[0] == "F32"
+            and len(scale_meta[1]) == 2
+        }
+        missing_markers -= native_fp8_prefixes
     if missing_markers:
         raise ValueError(
             "Quantized weights are missing comfy_quant metadata: "
