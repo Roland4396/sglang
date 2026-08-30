@@ -226,7 +226,11 @@ def init_parallel_group_coordinator(
             local_rank=local_rank,
             torch_distributed_backend=backend,
             use_device_communicator=parallel_mode != "tensor",
-            use_srt_custom_allreduce=parallel_mode == "tensor",
+            use_srt_custom_allreduce=(
+                parallel_mode == "tensor"
+                and os.environ.get("SGLANG_DIFFUSION_DISABLE_CUSTOM_ALL_REDUCE")
+                != "1"
+            ),
             group_name=group_name,
         )
 

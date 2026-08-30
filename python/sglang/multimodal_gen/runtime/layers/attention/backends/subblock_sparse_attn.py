@@ -155,12 +155,11 @@ def _sm90_sparse_attention(
     sparse_tensors = BlockSparseTensorsTorch(
         mask_block_cnt=block_counts,
         mask_block_idx=ordered_index,
-        # There are no always-dense blocks in a SubBlock routing plan. The
-        # block-sparse broadcast pattern records both absent tensors as None
-        # and participates in the compile key, so mask-only and mask+full calls
-        # cannot share a compiled kernel.
-        full_block_cnt=None,
-        full_block_idx=None,
+        # The SM90 CuTe tracer used by the H20 environment traces both sides of
+        # a dynamic branch. Empty tensors keep the compile-time shape stable;
+        # the zero count ensures they never participate in attention.
+        full_block_cnt=torch.zeros_like(block_counts),
+        full_block_idx=torch.zeros_like(ordered_index),
         block_size=(SUBBLOCK_SPARSE_BLOCK_SIZE, SUBBLOCK_SPARSE_BLOCK_SIZE),
     )
     out, _ = flash_attn_func(

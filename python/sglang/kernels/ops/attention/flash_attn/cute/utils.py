@@ -371,32 +371,38 @@ def fmax(
     loc=None,
     ip=None,
 ) -> Float32:
-    from cutlass import CUDA_VERSION
+    # CUTLASS DSL releases do not map one-to-one to the reported CUDA toolkit
+    # version. In particular, the H20 deployment reports CUDA 12.9 while its
+    # generated NVVM op uses the newer two-operand signature. Detect the
+    # callable ABI directly so both DSL variants remain supported.
+    try:
+        positional = [
+            parameter
+            for parameter in inspect.signature(nvvm.fmax).parameters.values()
+            if parameter.kind
+            in (
+                inspect.Parameter.POSITIONAL_ONLY,
+                inspect.Parameter.POSITIONAL_OR_KEYWORD,
+            )
+        ]
+        old_api = len(positional) >= 3
+    except (TypeError, ValueError):
+        old_api = False
 
-    # * NVVM call based on nvvm version
-    if CUDA_VERSION.major == 12 and CUDA_VERSION.minor == 9:
-        # Old API: requires explicit result type as first positional argument
-        return Float32(
-            nvvm.fmax(
-                T.f32(),
-                Float32(a).ir_value(loc=loc, ip=ip),
-                Float32(b).ir_value(loc=loc, ip=ip),
-                c=Float32(c).ir_value(loc=loc, ip=ip) if c is not None else None,
-                loc=loc,
-                ip=ip,
-            )
+    args = [
+        Float32(a).ir_value(loc=loc, ip=ip),
+        Float32(b).ir_value(loc=loc, ip=ip),
+    ]
+    if old_api:
+        args.insert(0, T.f32())
+    return Float32(
+        nvvm.fmax(
+            *args,
+            c=Float32(c).ir_value(loc=loc, ip=ip) if c is not None else None,
+            loc=loc,
+            ip=ip,
         )
-    else:
-        # New API: infers result type automatically
-        return Float32(
-            nvvm.fmax(
-                Float32(a).ir_value(loc=loc, ip=ip),
-                Float32(b).ir_value(loc=loc, ip=ip),
-                c=Float32(c).ir_value(loc=loc, ip=ip) if c is not None else None,
-                loc=loc,
-                ip=ip,
-            )
-        )
+    )
 
 
 @cute.jit

@@ -326,6 +326,22 @@ def test_high_quality_deployment_rejects_transformer_weight_override():
         config.validate_quality_deployment(server_args)
 
 
+def test_high_quality_deployment_accepts_h20_hopper():
+    config = MiniMaxH3PipelineConfig()
+    server_args = _quality_server_args()
+
+    with (
+        patch.object(current_platform, "is_cuda", return_value=True),
+        patch.object(current_platform, "get_device_name", return_value="NVIDIA H20"),
+        patch.object(
+            current_platform,
+            "get_device_capability",
+            return_value=_HopperCapability(),
+        ),
+    ):
+        config.validate_quality_deployment(server_args)
+
+
 def test_high_quality_request_warns_when_bcg_suppresses_cache_dit():
     stage = MiniMaxH3DenoisingStage.__new__(MiniMaxH3DenoisingStage)
     stage.server_args = SimpleNamespace(enable_breakable_cuda_graph=True)

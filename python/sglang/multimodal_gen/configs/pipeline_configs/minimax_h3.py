@@ -208,19 +208,20 @@ class MiniMaxH3PipelineConfig(PipelineConfig):
                 else actual[name] != wanted
             )
         }
+        device_upper = device_name.upper()
         if (
             not current_platform.is_cuda()
-            or "H200" not in device_name.upper()
+            or not any(name in device_upper for name in ("H20", "H200"))
             or capability_int != 90
         ):
             mismatches["device"] = {
-                "expected": "NVIDIA H200 (compute capability 9.0)",
+                "expected": "NVIDIA H20/H200 (compute capability 9.0)",
                 "actual": f"{device_name} (compute capability {capability_int})",
             }
         if mismatches:
             raise ValueError(
                 'MiniMax-H3 quality="high" is validated only for '
-                f"the strict 4xH200 fl2va deployment; mismatches: {mismatches}"
+                f"the strict 4xH20/H200 fl2va deployment; mismatches: {mismatches}"
             )
 
     def validate_server_args(self, server_args) -> None:
