@@ -18,6 +18,23 @@ class AsyncDictStore:
         async with self._lock:
             self._items[key] = value
 
+    async def insert_if_absent(
+        self, key: str, value: Dict[str, Any]
+    ) -> Optional[Dict[str, Any]]:
+        """Insert once and return the existing item when the key is reserved.
+
+        This is used by long-running media creates so a replayed HTTP request
+        cannot start a second generation while the first request is still
+        preparing its scheduler batch.
+        """
+
+        async with self._lock:
+            existing = self._items.get(key)
+            if existing is not None:
+                return existing
+            self._items[key] = value
+            return None
+
     async def update_fields(
         self, key: str, updates: Dict[str, Any]
     ) -> Optional[Dict[str, Any]]:

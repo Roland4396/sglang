@@ -6,6 +6,7 @@ import os
 import shutil
 import tempfile
 import time
+import uuid
 from collections.abc import Coroutine
 from contextlib import suppress
 from typing import Any, Dict, Optional
@@ -604,7 +605,23 @@ async def create_video(
     extra_body: Optional[str] = Form(None),
 ):
     content_type = request.headers.get("content-type", "").lower()
-    request_id = generate_request_id()
+    idempotency_key = (request.headers.get("idempotency-key") or "").strip().lower()
+    if idempotency_key:
+        try:
+            request_id = str(uuid.UUID(idempotency_key))
+        except (ValueError, AttributeError) as exc:
+            raise HTTPException(
+                status_code=400, detail="Idempotency-Key must be a canonical UUID"
+            ) from exc
+        if request_id != idempotency_key:
+            raise HTTPException(
+                status_code=400, detail="Idempotency-Key must be a canonical UUID"
+            )
+        existing = await VIDEO_STORE.get(request_id)
+        if existing is not None:
+            return VideoResponse(**existing)
+    else:
+        request_id = generate_request_id()
 
     server_args = get_global_server_args()
     task_type = server_args.pipeline_config.task_type
@@ -866,7 +883,18 @@ async def create_video(
             server_args.served_model_name,
         )
         job.update(sampling_params.project_video_queued_job_fields(batch))
-        await VIDEO_STORE.upsert(request_id, job)
+        existing = await VIDEO_STORE.insert_if_absent(request_id, job)
+        if existing is not None:
+            try:
+                await asyncio.to_thread(sampling_params.cleanup_video_request, batch)
+            except Exception:
+                logger.warning(
+                    "Failed to clean up duplicate video request resources",
+                    exc_info=True,
+                )
+            for td in temp_dirs:
+                shutil.rmtree(td, ignore_errors=True)
+            return VideoResponse(**existing)
     except Exception as e:
         if batch is not None:
             try:
@@ -916,14 +944,28 @@ async def retrieve_video(video_id: str = Path(...)):
     return VideoResponse(**job)
 
 
-# TODO: support aborting a job.
 @router.delete("/{video_id}", response_model=VideoResponse)
 async def delete_video(video_id: str = Path(...)):
-    job = await VIDEO_STORE.pop(video_id)
+    job = await VIDEO_STORE.get(video_id)
     if not job:
         raise HTTPException(status_code=404, detail="Video not found")
-    # Mark as deleted in response semantics
-    job["status"] = "deleted"
+    task = _VIDEO_JOB_TASKS.get(video_id)
+    if task is not None and not task.done():
+        task.cancel()
+        with suppress(asyncio.CancelledError):
+            await task
+        updated = await VIDEO_STORE.update_fields(
+            video_id,
+            {
+                "status": "cancelled",
+                "completed_at": int(time.time()),
+                "error": {"message": "cancelled by client"},
+            },
+        )
+        assert updated is not None
+        return VideoResponse(**updated)
+    # Terminal jobs are immutable.  A repeated cancellation/deletion request
+    # returns the durable job rather than erasing the only reconciliation key.
     return VideoResponse(**job)
 
 
