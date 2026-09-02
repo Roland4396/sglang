@@ -4,6 +4,7 @@ import torch
 
 from sglang.multimodal_gen.runtime.models.dits.minimax_h3 import (
     _install_qkv_row_reorder,
+    _reorder_grouped_qkv_block_scales,
 )
 
 QKV_ROWS = 12
@@ -54,6 +55,35 @@ class TestMiniMaxH3QkvScaleReorder(unittest.TestCase):
         )
         scale = torch.tensor(0.5)
         self.assertTrue(torch.equal(param.rank_local_weight_transform(scale), scale))
+
+    def test_block_fp8_scale_rows_follow_grouped_qkv_permutation(self):
+        # Four heads, with one 128-row scale block for each Q/K/V section.
+        scales = torch.arange(12 * 2, dtype=torch.float32).reshape(12, 2)
+        expected = torch.cat(
+            [scales.view(4, 3, 2)[:, 0], scales.view(4, 3, 2)[:, 1], scales.view(4, 3, 2)[:, 2]],
+            dim=0,
+        )
+        actual = _reorder_grouped_qkv_block_scales(
+            scales, num_query_groups=4
+        )
+        self.assertTrue(torch.equal(actual, expected))
+
+    def test_block_fp8_scale_loader_reorders_before_tp_sharding(self):
+        param = torch.zeros(12, 2)
+        seen = []
+        param.weight_loader = lambda p, loaded_weight: seen.append(loaded_weight)
+        _install_qkv_row_reorder(
+            param,
+            lambda scales: _reorder_grouped_qkv_block_scales(
+                scales, num_query_groups=4
+            ),
+            12,
+        )
+        scales = torch.arange(12 * 2, dtype=torch.float32).reshape(12, 2)
+        param.weight_loader(param, scales)
+        self.assertTrue(
+            torch.equal(seen[0], _reorder_grouped_qkv_block_scales(scales, num_query_groups=4))
+        )
 
 
 if __name__ == "__main__":

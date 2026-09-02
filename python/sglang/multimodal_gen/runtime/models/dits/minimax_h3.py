@@ -227,6 +227,26 @@ def _reorder_grouped_qkv_to_qkv(
     )
 
 
+def _reorder_grouped_qkv_block_scales(
+    scales: torch.Tensor, *, num_query_groups: int
+) -> torch.Tensor:
+    """Reorder 128-row block scales alongside H3's grouped QKV rows.
+
+    H3's serialized FP8 checkpoint stores Q, K, and V for each head in one
+    contiguous group.  The fused runtime projection stores all Q rows, then
+    all K rows, then all V rows.  With a 128-row block quantization layout and
+    H3's 128-dimensional heads, each head's Q/K/V section is exactly one scale
+    row, so the same permutation applies with ``head_dim=1``.
+    """
+
+    return _reorder_grouped_qkv_to_qkv(
+        scales,
+        num_query_groups=num_query_groups,
+        heads_per_group=1,
+        head_dim=1,
+    )
+
+
 def _install_qkv_row_reorder(
     param: torch.Tensor,
     reorder: Callable[[torch.Tensor], torch.Tensor],
@@ -795,7 +815,20 @@ class MiniMaxH3Attention(nn.Module):
         for name, param in self.qkv_proj.named_parameters(recurse=False):
             if name == "weight":
                 continue
-            _install_qkv_row_reorder(param, _reorder_checkpoint_weight, qkv_rows)
+            if name == "weight_scale_inv":
+                # Block-FP8 scales are [qkv_rows / 128, k / 128], not one
+                # element per output row.  Because H3's head_dim is 128, the
+                # first scale dimension is [num_heads, Q/K/V], so it needs the
+                # block-level permutation rather than the element-row gate.
+                _install_qkv_row_reorder(
+                    param,
+                    lambda scales: _reorder_grouped_qkv_block_scales(
+                        scales, num_query_groups=arch.num_attention_heads
+                    ),
+                    3 * arch.num_attention_heads,
+                )
+            else:
+                _install_qkv_row_reorder(param, _reorder_checkpoint_weight, qkv_rows)
 
     def _forward_mps_streamed_attention(
         self,
