@@ -8,6 +8,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from contextlib import contextmanager
 from functools import partial
+import os
 from typing import Any
 
 import torch
@@ -42,6 +43,54 @@ from sglang.multimodal_gen.runtime.utils.nvtx_pytorch_hooks import maybe_nvtx_ra
 from sglang.multimodal_gen.runtime.utils.perf_logger import StageProfiler
 
 logger = init_logger(__name__)
+
+
+def _h3_diagnostics_enabled() -> bool:
+    return os.getenv("SGLANG_H3_DEBUG_TENSOR_STATS", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+        "debug",
+    }
+
+
+def _log_h3_tensor_stats(label: str, tensor: torch.Tensor | None) -> None:
+    if not _h3_diagnostics_enabled():
+        return
+    if tensor is None:
+        logger.info("[H3 diagnostics] %s: None", label)
+        return
+    data = tensor.detach()
+    if data.numel() == 0:
+        logger.info(
+            "[H3 diagnostics] %s: shape=%s dtype=%s device=%s empty",
+            label,
+            tuple(data.shape),
+            data.dtype,
+            data.device,
+        )
+        return
+    stats = data.float()
+    finite = torch.isfinite(stats)
+    finite_values = stats[finite] if bool(finite.any().item()) else stats.reshape(-1)
+    flat = finite_values.reshape(-1)
+    stride = max(1, flat.numel() // 4096)
+    logger.info(
+        "[H3 diagnostics] %s: shape=%s dtype=%s device=%s finite=%.6f "
+        "min=%.6g max=%.6g mean=%.6g std=%.6g l2=%.6g fingerprint=%.6g",
+        label,
+        tuple(data.shape),
+        data.dtype,
+        data.device,
+        float(finite.float().mean().item()),
+        float(finite_values.min().item()),
+        float(finite_values.max().item()),
+        float(finite_values.mean().item()),
+        float(finite_values.std(unbiased=False).item()),
+        float(torch.linalg.vector_norm(finite_values).item()),
+        float(flat[::stride].sum().item()),
+    )
 
 _REF2VA_VIDEO_CHAINS = {
     "video.reference_preserve",
@@ -700,6 +749,8 @@ class MiniMaxH3DenoisingStage(DenoisingStage):
                 device=device,
             )
             initial_video, initial_audio = _expand_initial_rows(ctx, positive)
+            _log_h3_tensor_stats("denoise.initial_video_rows", initial_video)
+            _log_h3_tensor_stats("denoise.initial_audio_rows", initial_audio)
             with (
                 maybe_nvtx_range("denoising_loop", self.current_use_nvtx),
                 self.progress_bar(
@@ -733,6 +784,8 @@ class MiniMaxH3DenoisingStage(DenoisingStage):
                         batch=batch,
                     ),
                 )
+            _log_h3_tensor_stats("denoise.final_video_rows", video_rows)
+            _log_h3_tensor_stats("denoise.final_audio_rows", audio_rows)
         finally:
             self._finish_active_component_use()
         _publish_full_loop_outputs(
@@ -1086,10 +1139,12 @@ def _publish_full_loop_outputs(
         latent_shape=[ctx.latent_t, ctx.latent_h // 2, ctx.latent_w // 2, 24],
         patch_size=[1, 2, 2],
     )
+    _log_h3_tensor_stats("denoise.output_visual_latents", batch.latents)
     audio_target_rows = audio_rows[positive.audio_target_slice]
     batch.audio_latents = minimax_h3_unpack_audio_tokens(
         audio_target_rows, audio_t=ctx.audio_t * 2, audio_channel=2
     )
+    _log_h3_tensor_stats("denoise.output_audio_latents", batch.audio_latents)
 
 
 __all__ = [

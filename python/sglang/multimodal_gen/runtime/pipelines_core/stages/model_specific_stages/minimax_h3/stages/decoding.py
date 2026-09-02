@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import functools
+import os
 from collections.abc import Mapping
 from contextlib import nullcontext
 
@@ -37,12 +38,63 @@ from sglang.multimodal_gen.runtime.utils.precision import (
 from sglang.multimodal_gen.runtime.utils.torch_compile import (
     ActiveTargetCompiledCallable,
 )
+from sglang.multimodal_gen.runtime.utils.logging_utils import init_logger
+
+logger = init_logger(__name__)
 
 
 def _required_tensor(value, path: str) -> torch.Tensor:
     if not isinstance(value, torch.Tensor):
         raise ValueError(f"{path} must be a torch.Tensor")
     return value
+
+
+def _h3_diagnostics_enabled() -> bool:
+    return os.getenv("SGLANG_H3_DEBUG_TENSOR_STATS", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+        "debug",
+    }
+
+
+def _log_h3_tensor_stats(label: str, tensor: torch.Tensor | None) -> None:
+    if not _h3_diagnostics_enabled():
+        return
+    if tensor is None:
+        logger.info("[H3 diagnostics] %s: None", label)
+        return
+    data = tensor.detach()
+    if data.numel() == 0:
+        logger.info(
+            "[H3 diagnostics] %s: shape=%s dtype=%s device=%s empty",
+            label,
+            tuple(data.shape),
+            data.dtype,
+            data.device,
+        )
+        return
+    stats = data.float()
+    finite = torch.isfinite(stats)
+    finite_values = stats[finite] if bool(finite.any().item()) else stats.reshape(-1)
+    flat = finite_values.reshape(-1)
+    stride = max(1, flat.numel() // 4096)
+    logger.info(
+        "[H3 diagnostics] %s: shape=%s dtype=%s device=%s finite=%.6f "
+        "min=%.6g max=%.6g mean=%.6g std=%.6g l2=%.6g fingerprint=%.6g",
+        label,
+        tuple(data.shape),
+        data.dtype,
+        data.device,
+        float(finite.float().mean().item()),
+        float(finite_values.min().item()),
+        float(finite_values.max().item()),
+        float(finite_values.mean().item()),
+        float(finite_values.std(unbiased=False).item()),
+        float(torch.linalg.vector_norm(finite_values).item()),
+        float(flat[::stride].sum().item()),
+    )
 
 
 @functools.lru_cache(maxsize=None)
@@ -326,6 +378,8 @@ class MiniMaxH3DecodingStage(DecodingStage):
         _minimax_h3_decoder_task(batch)
         visual_latent = _required_tensor(batch.latents, "batch.latents")
         audio_latent = _required_tensor(batch.audio_latents, "batch.audio_latents")
+        _log_h3_tensor_stats("decode.input_visual_latents", visual_latent)
+        _log_h3_tensor_stats("decode.input_audio_latents", audio_latent)
         if visual_latent.ndim != 5:
             raise ValueError("batch.latents must be [B, C, T, H, W]")
         if audio_latent.ndim != 3:
@@ -351,6 +405,7 @@ class MiniMaxH3DecodingStage(DecodingStage):
                 std_values=visual_arch_config.latents_std,
                 name="video_vae",
             )
+            _log_h3_tensor_stats("decode.video_vae_latent_denormalized", visual_decode_latent)
             video_vae_dtype = resolve_decode_precision(server_args, "video_vae")
             visual_autocast_enabled = autocast_enabled_for_device(
                 visual_latent, video_vae_dtype, server_args.disable_autocast
@@ -369,9 +424,11 @@ class MiniMaxH3DecodingStage(DecodingStage):
                 )
                 with set_forward_context(current_timestep=0, attn_metadata=None):
                     visual_frames = video_decode(visual_decode_latent)
+                _log_h3_tensor_stats("decode.video_vae_raw", visual_frames)
                 visual_frames = selected_video_vae.processor.revert_tensor(
                     visual_frames
                 )
+                _log_h3_tensor_stats("decode.video_frames_reverted", visual_frames)
                 visual_frames = _required_tensor(
                     visual_frames,
                     "video_vae.processor.revert_tensor",
