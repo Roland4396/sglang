@@ -408,11 +408,18 @@ class MiniMaxH3Qwen3VLEncoder(TextEncoder):
                     "Unexpected MiniMax H3 Qwen3-VL checkpoint weight: "
                     f"{name} (mapped to {param_name})"
                 )
-            weight_loader = (
-                default_weight_loader
-                if getattr(self, "_rank_sharded_checkpoint", False)
-                else getattr(param, "weight_loader", default_weight_loader)
-            )
+            if getattr(self, "_rank_sharded_checkpoint", False):
+                # Rank shards contain local tensors for TP-aware parameters,
+                # but replicated visual blocks may still be full-sized. Keep
+                # native slicing for those full tensors while directly
+                # loading tensors whose shape already matches this rank.
+                weight_loader = (
+                    default_weight_loader
+                    if tuple(loaded_weight.shape) == tuple(param.shape)
+                    else getattr(param, "weight_loader", default_weight_loader)
+                )
+            else:
+                weight_loader = getattr(param, "weight_loader", default_weight_loader)
             try:
                 can_keep_checkpoint_tensor = bool(
                     getattr(self, "_keep_checkpoint_mapping", False)
