@@ -4,6 +4,7 @@ from collections import defaultdict
 from collections.abc import Callable
 from contextlib import ExitStack
 from dataclasses import dataclass
+from pathlib import Path
 from types import MethodType
 from typing import Any
 
@@ -19,6 +20,9 @@ from sglang.multimodal_gen.runtime.layers.linear import (
     RowParallelLinear,
 )
 from sglang.multimodal_gen.runtime.loader.weight_utils import _scan_safetensors_files
+from sglang.multimodal_gen.runtime.loader.h3_rank_sharded_checkpoint import (
+    resolve_rank_shard,
+)
 from sglang.multimodal_gen.runtime.utils.logging_utils import init_logger
 
 logger = init_logger(__name__)
@@ -402,6 +406,20 @@ def try_load_rank_local_tp_state_dict(
     tp_size = get_tp_world_size()
     if tp_size == 1:
         return None
+
+    # H3 rank shards already contain the exact local tensors. Loading them
+    # through the ordinary TP path would slice them a second time.
+    source_dir = Path(weight_files[0]).parent if weight_files else None
+    rank_shard = resolve_rank_shard("transformer", source_dir) if source_dir else None
+    if rank_shard is not None:
+        with safe_open(rank_shard, framework="pt", device="cpu") as handle:
+            local_state = {
+                name: LocalTPShard(handle.get_tensor(name))
+                for name in handle.keys()
+            }
+        reverse = {name: (name, None, None) for name in local_state}
+        logger.info("Loading transformer rank shard from %s", rank_shard)
+        return local_state, reverse
 
     meta_sd = model.state_dict()
     param_dict = dict(model.named_parameters())

@@ -60,6 +60,9 @@ from sglang.multimodal_gen.runtime.loader.component_loaders.component_loader imp
     NativeComponentLoaderRequired,
     uses_native_transformers_bnb4,
 )
+from sglang.multimodal_gen.runtime.loader.h3_rank_sharded_checkpoint import (
+    resolve_rank_shard,
+)
 from sglang.multimodal_gen.runtime.loader.gguf_weights import (
     gguf_weights_iterator,
     names_gguf_checkpoint,
@@ -923,6 +926,12 @@ class TextEncoderLoader(ComponentLoader):
                 model._keep_checkpoint_mapping = True
 
             weights_to_load = {name for name, _ in model.named_parameters()}
+            source_model_path = model_path
+            rank_shard = resolve_rank_shard("text_encoder", source_model_path)
+            if rank_shard is not None:
+                logger.info("Loading text_encoder rank shard from %s", rank_shard)
+                model._rank_sharded_checkpoint = True
+                model_path = str(rank_shard)
             if isinstance(quant_config, GGUFConfig):
                 checkpoint_weights = gguf_weights_iterator(
                     model_path,
