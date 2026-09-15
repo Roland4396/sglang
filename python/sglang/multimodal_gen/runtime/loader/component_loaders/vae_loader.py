@@ -176,6 +176,11 @@ def _rehome_cast_weights_to_file(
 
     Returns (weights held, file-backed?).
     """
+    # This store is for CPU residency only. A GPU-resident VAE has no CPU
+    # cast_state, so writing it produces an empty file and a false mismatch on
+    # the next load. Adopting a CPU mapping here could also move weights off GPU.
+    if any(parameter.device.type != "cpu" for parameter in vae.parameters()):
+        return prepare(dtype), False
     path = _decode_dtype_store_path(component_model_path, component_name, dtype)
     try:
         if os.path.exists(path):
