@@ -7,11 +7,11 @@ from torch.utils.cpp_extension import load
 from sageattention.core import per_thread_int8_triton,per_channel_fp8,sm90_compile
 
 ROOT=Path(__file__).resolve().parent
-OUT=Path(os.environ.get('H3_TILE_BENCH_OUT','/home/xql/.local/state/gpu-runtime/benchmarks/20260916-operators/tile-bench-v4.json'))
+OUT=Path(os.environ.get('H3_TILE_BENCH_OUT','/home/xql/.local/state/gpu-runtime/benchmarks/20260916-operators/tile-bench-v5.json'))
 os.environ.setdefault('MAX_JOBS','2')
 os.environ['TORCH_CUDA_ARCH_LIST']='9.0a'
 started=time.time()
-module=load(name='h3_sage_tile_20260916_v4',sources=[str(ROOT/'csrc/qattn/h3_tile.cu')],extra_cuda_cflags=['-O3','--use_fast_math','-U__CUDA_NO_HALF_OPERATORS__','-U__CUDA_NO_HALF_CONVERSIONS__','-U__CUDA_NO_BFLOAT16_CONVERSIONS__','-U__CUDA_NO_HALF2_OPERATORS__','--ptxas-options=-v'],extra_ldflags=['-lcuda'],verbose=True)
+module=load(name='h3_sage_tile_20260916_v5',sources=[str(ROOT/'csrc/qattn/h3_tile.cu')],extra_cuda_cflags=['-O3','--use_fast_math','-U__CUDA_NO_HALF_OPERATORS__','-U__CUDA_NO_HALF_CONVERSIONS__','-U__CUDA_NO_BFLOAT16_CONVERSIONS__','-U__CUDA_NO_HALF2_OPERATORS__','--ptxas-options=-v'],extra_ldflags=['-lcuda'],verbose=True)
 print('BUILD_SECONDS',time.time()-started,flush=True)
 rows=[]
 
@@ -31,7 +31,7 @@ def run(n,heads,repeats):
  if pad:v=torch.cat([v,torch.zeros(1,pad,heads,128,device='cuda',dtype=v.dtype)],dim=1)
  vi,vs,_=per_channel_fp8(v,tensor_layout='NHD',smooth_v=False)
  scale=128**-0.5
- variants={'compiled_control':64,'k64':66,'k64_split_pv':67,'k64_split_pv_cta4':68,'k128_split_pv_cta4':69,'k128_cta4':70}
+ variants={'compiled_control':64,'k128_cta3':71,'k128_split_pv_cta3':72,'k64_cta3':73,'k64_split_pv_cta3':74,'k128_cta4':70}
  outputs={name:torch.empty_like(q) for name in ['installed',*variants]}
  funcs={'installed':lambda:sm90_compile.qk_int8_sv_f8_accum_f32_fuse_v_scale_attn_inst_buf(qi,ki,vi,outputs['installed'],qs,ks,vs,0,0,3,scale,0)}
  for name,tile in variants.items():
@@ -43,7 +43,7 @@ def run(n,heads,repeats):
  assert all(c['finite'] for c in checks.values()),checks
  # K=64 changes online-softmax rounding, not Q/K/V quantization. Report it;
  # do not silently claim equivalence or promote a kernel based only on latency.
- for name in ('compiled_control','k128_split_pv_cta4','k128_cta4'):
+ for name in ('compiled_control','k128_cta3','k128_split_pv_cta3','k128_cta4'):
   assert checks[name]['relative_l2']<0.001,(n,name,checks[name])
  stream=torch.cuda.Stream();stream.wait_stream(torch.cuda.current_stream())
  with torch.cuda.stream(stream):

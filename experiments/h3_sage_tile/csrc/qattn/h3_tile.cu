@@ -682,6 +682,10 @@ void forward(torch::Tensor q,torch::Tensor k,torch::Tensor v,torch::Tensor o,
   else if(tile==68) launch<64,128,true,64,4>(q,k,v,o,qs,ks,vs,scale);
   else if(tile==69) launch<64,128,true,128,4>(q,k,v,o,qs,ks,vs,scale);
   else if(tile==70) launch<64,128,false,128,4>(q,k,v,o,qs,ks,vs,scale);
+  else if(tile==71) launch<64,128,false,128,3>(q,k,v,o,qs,ks,vs,scale);
+  else if(tile==72) launch<64,128,true,128,3>(q,k,v,o,qs,ks,vs,scale);
+  else if(tile==73) launch<64,128,false,64,3>(q,k,v,o,qs,ks,vs,scale);
+  else if(tile==74) launch<64,128,true,64,3>(q,k,v,o,qs,ks,vs,scale);
   else TORCH_CHECK(false,"unsupported experimental tile");
 }
 PYBIND11_MODULE(TORCH_EXTENSION_NAME,m) {m.def("forward", &forward);}
