@@ -125,8 +125,8 @@ __device__ __forceinline__ void arrive(uint64_t* bar) {
     );
 }
 
-template<uint32_t CTA_Q, uint32_t CTA_K, uint32_t NUM_THREADS, uint32_t head_dim, QuantGranularity Q_GRAN, QuantGranularity K_GRAN, typename DTypeOut, MaskMode mask_mode = MaskMode::kNone, bool return_lse = false, bool fuse_v_scale=false, bool split_pv=false>
-__global__ void qk_int8_sv_f8_attn_kernel(const __grid_constant__ CUtensorMap tensorMapQ, 
+template<uint32_t CTA_Q, uint32_t CTA_K, uint32_t NUM_THREADS, uint32_t head_dim, QuantGranularity Q_GRAN, QuantGranularity K_GRAN, typename DTypeOut, MaskMode mask_mode = MaskMode::kNone, bool return_lse = false, bool fuse_v_scale=false, bool split_pv=false, int min_ctas=1>
+__global__ __launch_bounds__(NUM_THREADS, min_ctas) void qk_int8_sv_f8_attn_kernel(const __grid_constant__ CUtensorMap tensorMapQ,
                                         const __grid_constant__ CUtensorMap tensorMapK,
                                         const __grid_constant__ CUtensorMap tensorMapV,
                                         float *__restrict__ Q_scale, float *__restrict__ K_scale, float *__restrict__ V_scale,
@@ -181,12 +181,12 @@ __global__ void qk_int8_sv_f8_attn_kernel(const __grid_constant__ CUtensorMap te
 
   if constexpr (K_GRAN == QuantGranularity::kPerBlock || K_GRAN == QuantGranularity::kPerWarp)
   {
-    const uint32_t num_block_k = div_ceil(kv_len, CTA_K);
+    const uint32_t num_block_k = div_ceil(kv_len, 128);
     k_scale_idx = batch_id * (num_qo_heads / num_kv_groups) * num_block_k + (head_id / num_kv_groups) * num_block_k;
   }
   else if constexpr (K_GRAN == QuantGranularity::kPerThread)
   {
-    const uint32_t num_block_k = div_ceil(kv_len, CTA_K);
+    const uint32_t num_block_k = div_ceil(kv_len, 128);
     k_scale_idx = batch_id * (num_qo_heads / num_kv_groups) * (num_block_k * 4) + (head_id / num_kv_groups) * (num_block_k * 4) + lane_id % 4;
   }
 
@@ -261,7 +261,7 @@ __global__ void qk_int8_sv_f8_attn_kernel(const __grid_constant__ CUtensorMap te
   { 
     p ^= 1;
 
-    float k_scale = K_scale[k_scale_idx + (iter - 1) * k_scale_advance_offset];
+    float k_scale = K_scale[k_scale_idx + ((iter - 1) * CTA_K / 128) * k_scale_advance_offset];
 
     // wait for K
     wait(&barrier_K, p);
@@ -403,7 +403,7 @@ __global__ void qk_int8_sv_f8_attn_kernel(const __grid_constant__ CUtensorMap te
   { 
     p ^= 1;
 
-    float k_scale = K_scale[k_scale_idx + (num_iterations - 1) * k_scale_advance_offset];
+    float k_scale = K_scale[k_scale_idx + ((num_iterations - 1) * CTA_K / 128) * k_scale_advance_offset];
     sm_scale = original_sm_scale;
 
     // wait for K
@@ -638,14 +638,14 @@ __global__ void qk_int8_sv_f8_attn_kernel(const __grid_constant__ CUtensorMap te
 
 // Deliberately narrow experimental API: BF16 output, NHD, D=128, noncausal,
 // per-thread INT8 Q/K and FP8 V with the original two-level FP32 accumulator.
-template<int CQ, int NT=128, bool SplitPV=false>
+template<int CQ, int NT=128, bool SplitPV=false, int CK=128, int MinCTAs=1>
 void launch(torch::Tensor q, torch::Tensor k, torch::Tensor v, torch::Tensor o,
             torch::Tensor qs, torch::Tensor ks, torch::Tensor vs, float scale) {
-  constexpr int CK=128, D=128;
+  constexpr int D=128;
   auto qm=create_tensor_map_4D<CQ,D>((int8_t*)q.data_ptr(),q.size(0),q.size(2),q.size(1),D,q.stride(0),q.stride(2),q.stride(1));
   auto km=create_tensor_map_4D<CK,D>((int8_t*)k.data_ptr(),k.size(0),k.size(2),k.size(1),D,k.stride(0),k.stride(2),k.stride(1));
   auto vm=create_tensor_map_4D<D,CK>((int8_t*)v.data_ptr(),v.size(0),v.size(2),D,v.size(3),v.stride(0),v.stride(2),v.stride(1));
-  auto kernel=qk_int8_sv_f8_attn_kernel<CQ,CK,NT,D,QuantGranularity::kPerThread,QuantGranularity::kPerThread,nv_bfloat16,MaskMode::kNone,false,true,SplitPV>;
+  auto kernel=qk_int8_sv_f8_attn_kernel<CQ,CK,NT,D,QuantGranularity::kPerThread,QuantGranularity::kPerThread,nv_bfloat16,MaskMode::kNone,false,true,SplitPV,MinCTAs>;
   size_t smem=CQ*D+CK*D*2;
   auto err=cudaFuncSetAttribute(kernel,cudaFuncAttributeMaxDynamicSharedMemorySize,smem);
   TORCH_CHECK(err==cudaSuccess,cudaGetErrorString(err));
@@ -677,6 +677,11 @@ void forward(torch::Tensor q,torch::Tensor k,torch::Tensor v,torch::Tensor o,
   else if(tile==256) launch<128,256>(q,k,v,o,qs,ks,vs,scale);
   else if(tile==65) launch<64,128,true>(q,k,v,o,qs,ks,vs,scale);
   else if(tile==257) launch<128,256,true>(q,k,v,o,qs,ks,vs,scale);
+  else if(tile==66) launch<64,128,false,64>(q,k,v,o,qs,ks,vs,scale);
+  else if(tile==67) launch<64,128,true,64>(q,k,v,o,qs,ks,vs,scale);
+  else if(tile==68) launch<64,128,true,64,4>(q,k,v,o,qs,ks,vs,scale);
+  else if(tile==69) launch<64,128,true,128,4>(q,k,v,o,qs,ks,vs,scale);
+  else if(tile==70) launch<64,128,false,128,4>(q,k,v,o,qs,ks,vs,scale);
   else TORCH_CHECK(false,"unsupported experimental tile");
 }
 PYBIND11_MODULE(TORCH_EXTENSION_NAME,m) {m.def("forward", &forward);}
