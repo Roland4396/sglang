@@ -6,11 +6,11 @@ from torch.utils.cpp_extension import load
 from sageattention.core import per_thread_int8_triton,per_channel_fp8,sm90_compile
 
 ROOT=Path(__file__).resolve().parent
-OUT=Path(os.environ.get('H3_TILE_BENCH_OUT','/home/xql/.local/state/gpu-runtime/benchmarks/20260916-operators/tile-bench-v2.json'))
+OUT=Path(os.environ.get('H3_TILE_BENCH_OUT','/home/xql/.local/state/gpu-runtime/benchmarks/20260916-operators/tile-bench-v3.json'))
 os.environ.setdefault('MAX_JOBS','2')
 os.environ['TORCH_CUDA_ARCH_LIST']='9.0a'
 started=time.time()
-module=load(name='h3_sage_tile_20260916_v2',sources=[str(ROOT/'csrc/qattn/h3_tile.cu')],extra_cuda_cflags=['-O3','--use_fast_math','-U__CUDA_NO_HALF_OPERATORS__','-U__CUDA_NO_HALF_CONVERSIONS__','-U__CUDA_NO_BFLOAT16_CONVERSIONS__','-U__CUDA_NO_HALF2_OPERATORS__','--ptxas-options=-v'],extra_ldflags=['-lcuda'],verbose=True)
+module=load(name='h3_sage_tile_20260916_v3',sources=[str(ROOT/'csrc/qattn/h3_tile.cu')],extra_cuda_cflags=['-O3','--use_fast_math','-U__CUDA_NO_HALF_OPERATORS__','-U__CUDA_NO_HALF_CONVERSIONS__','-U__CUDA_NO_BFLOAT16_CONVERSIONS__','-U__CUDA_NO_HALF2_OPERATORS__','--ptxas-options=-v'],extra_ldflags=['-lcuda'],verbose=True)
 print('BUILD_SECONDS',time.time()-started,flush=True)
 rows=[]
 
@@ -26,15 +26,17 @@ def run(n,heads,repeats):
  pad=(-n)%128
  if pad:v=torch.cat([v,torch.zeros(1,pad,heads,128,device='cuda',dtype=v.dtype)],dim=1)
  vi,vs,_=per_channel_fp8(v,tensor_layout='NHD',smooth_v=False)
- out0=torch.empty_like(q);out64=torch.empty_like(q);out128=torch.empty_like(q);out256=torch.empty_like(q);scale=128**-0.5
+ out0=torch.empty_like(q);out64=torch.empty_like(q);out128=torch.empty_like(q);out256=torch.empty_like(q);out65=torch.empty_like(q);out257=torch.empty_like(q);scale=128**-0.5
  funcs={
  'installed_q64':lambda:sm90_compile.qk_int8_sv_f8_accum_f32_fuse_v_scale_attn_inst_buf(qi,ki,vi,out0,qs,ks,vs,0,0,3,scale,0),
  'candidate_q64':lambda:module.forward(qi,ki,vi,out64,qs,ks,vs,scale,64),
  'candidate_q128':lambda:module.forward(qi,ki,vi,out128,qs,ks,vs,scale,128),
- 'candidate_q128_2wg':lambda:module.forward(qi,ki,vi,out256,qs,ks,vs,scale,256)}
+ 'candidate_q128_2wg':lambda:module.forward(qi,ki,vi,out256,qs,ks,vs,scale,256),
+ 'q64_split_pv':lambda:module.forward(qi,ki,vi,out65,qs,ks,vs,scale,65),
+ 'q128_2wg_split_pv':lambda:module.forward(qi,ki,vi,out257,qs,ks,vs,scale,257)}
  for f in funcs.values():f()
  torch.cuda.synchronize()
- checks={'q64':compare(out0,out64),'q128':compare(out0,out128),'q128_2wg':compare(out0,out256)}
+ checks={'q64':compare(out0,out64),'q128':compare(out0,out128),'q128_2wg':compare(out0,out256),'q64_split_pv':compare(out0,out65),'q128_2wg_split_pv':compare(out0,out257)}
  # Do not accept a speed result from an invalid output.
  for key,c in checks.items():assert c['finite'] and c['relative_l2']<0.001,(n,key,c)
  stream=torch.cuda.Stream()

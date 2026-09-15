@@ -125,7 +125,7 @@ __device__ __forceinline__ void arrive(uint64_t* bar) {
     );
 }
 
-template<uint32_t CTA_Q, uint32_t CTA_K, uint32_t NUM_THREADS, uint32_t head_dim, QuantGranularity Q_GRAN, QuantGranularity K_GRAN, typename DTypeOut, MaskMode mask_mode = MaskMode::kNone, bool return_lse = false, bool fuse_v_scale=false>
+template<uint32_t CTA_Q, uint32_t CTA_K, uint32_t NUM_THREADS, uint32_t head_dim, QuantGranularity Q_GRAN, QuantGranularity K_GRAN, typename DTypeOut, MaskMode mask_mode = MaskMode::kNone, bool return_lse = false, bool fuse_v_scale=false, bool split_pv=false>
 __global__ void qk_int8_sv_f8_attn_kernel(const __grid_constant__ CUtensorMap tensorMapQ, 
                                         const __grid_constant__ CUtensorMap tensorMapK,
                                         const __grid_constant__ CUtensorMap tensorMapV,
@@ -332,6 +332,33 @@ __global__ void qk_int8_sv_f8_attn_kernel(const __grid_constant__ CUtensorMap te
     // wait for V
     wait(&barrier_V, p);
 
+    if constexpr (split_pv) {
+      // Keep two-level FP32 accumulation and K=128; only split output columns
+      // so the transient WGMMA accumulator needs 32 instead of 64 registers.
+#pragma unroll
+      for (uint32_t half_v = 0; half_v < 2; half_v++) {
+        float tmp[num_tiles_q][num_tiles_v / 2][8];
+        wgmma::warpgroup_arrive();
+#pragma unroll
+        for (uint32_t fq = 0; fq < num_tiles_q; fq++) {
+          int8_t *vh = sV + half_v * (head_dim / 2) * CTA_K;
+          wgmma::wgmma_f8f8f32<head_dim / 2, 0, CTA_K>(tmp[fq], RS_f8[fq][0], vh);
+#pragma unroll
+          for (uint32_t vi = 1; vi < num_tiles_pv_inner; vi++)
+            wgmma::wgmma_f8f8f32<head_dim / 2, 1, CTA_K>(tmp[fq], RS_f8[fq][vi], vh + vi * 32);
+        }
+        wgmma::warpgroup_commit_batch();
+        wgmma::warpgroup_wait<0>();
+#pragma unroll
+        for (uint32_t fq = 0; fq < num_tiles_q; fq++)
+#pragma unroll
+          for (uint32_t fv = 0; fv < num_tiles_v / 2; fv++)
+#pragma unroll
+            for (uint32_t k = 0; k < 8; k++)
+              RO[fq][half_v * (num_tiles_v / 2) + fv][k] += tmp[fq][fv][k];
+      }
+      if constexpr (warp_groups > 1) __syncthreads();
+    } else {
     float RO_temp[num_tiles_q][num_tiles_v][8];
     wgmma::warpgroup_arrive();
 #pragma unroll
@@ -362,6 +389,7 @@ __global__ void qk_int8_sv_f8_attn_kernel(const __grid_constant__ CUtensorMap te
           RO[fq][fv][k] += RO_temp[fq][fv][k];
         }
       }
+    }
     }
 
     // load V
@@ -467,6 +495,33 @@ __global__ void qk_int8_sv_f8_attn_kernel(const __grid_constant__ CUtensorMap te
     // wait for V
     wait(&barrier_V, p);
 
+    if constexpr (split_pv) {
+      // Keep two-level FP32 accumulation and K=128; only split output columns
+      // so the transient WGMMA accumulator needs 32 instead of 64 registers.
+#pragma unroll
+      for (uint32_t half_v = 0; half_v < 2; half_v++) {
+        float tmp[num_tiles_q][num_tiles_v / 2][8];
+        wgmma::warpgroup_arrive();
+#pragma unroll
+        for (uint32_t fq = 0; fq < num_tiles_q; fq++) {
+          int8_t *vh = sV + half_v * (head_dim / 2) * CTA_K;
+          wgmma::wgmma_f8f8f32<head_dim / 2, 0, CTA_K>(tmp[fq], RS_f8[fq][0], vh);
+#pragma unroll
+          for (uint32_t vi = 1; vi < num_tiles_pv_inner; vi++)
+            wgmma::wgmma_f8f8f32<head_dim / 2, 1, CTA_K>(tmp[fq], RS_f8[fq][vi], vh + vi * 32);
+        }
+        wgmma::warpgroup_commit_batch();
+        wgmma::warpgroup_wait<0>();
+#pragma unroll
+        for (uint32_t fq = 0; fq < num_tiles_q; fq++)
+#pragma unroll
+          for (uint32_t fv = 0; fv < num_tiles_v / 2; fv++)
+#pragma unroll
+            for (uint32_t k = 0; k < 8; k++)
+              RO[fq][half_v * (num_tiles_v / 2) + fv][k] += tmp[fq][fv][k];
+      }
+      if constexpr (warp_groups > 1) __syncthreads();
+    } else {
     float RO_temp[num_tiles_q][num_tiles_v][8];
     wgmma::warpgroup_arrive();
 #pragma unroll
@@ -497,6 +552,7 @@ __global__ void qk_int8_sv_f8_attn_kernel(const __grid_constant__ CUtensorMap te
           RO[fq][fv][k] += RO_temp[fq][fv][k];
         }
       }
+    }
     }
   }
 
@@ -582,14 +638,14 @@ __global__ void qk_int8_sv_f8_attn_kernel(const __grid_constant__ CUtensorMap te
 
 // Deliberately narrow experimental API: BF16 output, NHD, D=128, noncausal,
 // per-thread INT8 Q/K and FP8 V with the original two-level FP32 accumulator.
-template<int CQ, int NT=128>
+template<int CQ, int NT=128, bool SplitPV=false>
 void launch(torch::Tensor q, torch::Tensor k, torch::Tensor v, torch::Tensor o,
             torch::Tensor qs, torch::Tensor ks, torch::Tensor vs, float scale) {
   constexpr int CK=128, D=128;
   auto qm=create_tensor_map_4D<CQ,D>((int8_t*)q.data_ptr(),q.size(0),q.size(2),q.size(1),D,q.stride(0),q.stride(2),q.stride(1));
   auto km=create_tensor_map_4D<CK,D>((int8_t*)k.data_ptr(),k.size(0),k.size(2),k.size(1),D,k.stride(0),k.stride(2),k.stride(1));
   auto vm=create_tensor_map_4D<D,CK>((int8_t*)v.data_ptr(),v.size(0),v.size(2),D,v.size(3),v.stride(0),v.stride(2),v.stride(1));
-  auto kernel=qk_int8_sv_f8_attn_kernel<CQ,CK,NT,D,QuantGranularity::kPerThread,QuantGranularity::kPerThread,nv_bfloat16,MaskMode::kNone,false,true>;
+  auto kernel=qk_int8_sv_f8_attn_kernel<CQ,CK,NT,D,QuantGranularity::kPerThread,QuantGranularity::kPerThread,nv_bfloat16,MaskMode::kNone,false,true,SplitPV>;
   size_t smem=CQ*D+CK*D*2;
   auto err=cudaFuncSetAttribute(kernel,cudaFuncAttributeMaxDynamicSharedMemorySize,smem);
   TORCH_CHECK(err==cudaSuccess,cudaGetErrorString(err));
@@ -619,6 +675,8 @@ void forward(torch::Tensor q,torch::Tensor k,torch::Tensor v,torch::Tensor o,
   if(tile==64) launch<64>(q,k,v,o,qs,ks,vs,scale);
   else if(tile==128) launch<128>(q,k,v,o,qs,ks,vs,scale);
   else if(tile==256) launch<128,256>(q,k,v,o,qs,ks,vs,scale);
-  else TORCH_CHECK(false,"tile must be 64, 128 or 256 (two warp groups)");
+  else if(tile==65) launch<64,128,true>(q,k,v,o,qs,ks,vs,scale);
+  else if(tile==257) launch<128,256,true>(q,k,v,o,qs,ks,vs,scale);
+  else TORCH_CHECK(false,"unsupported experimental tile");
 }
 PYBIND11_MODULE(TORCH_EXTENSION_NAME,m) {m.def("forward", &forward);}
