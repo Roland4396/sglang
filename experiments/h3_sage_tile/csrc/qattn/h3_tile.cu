@@ -134,13 +134,16 @@ __global__ void qk_int8_sv_f8_attn_kernel(const __grid_constant__ CUtensorMap te
                                         const uint32_t qo_len, const uint32_t kv_len, const uint32_t num_kv_groups,
                                         float sm_scale)
 {
-  static_assert(NUM_THREADS == 128);
+  static_assert(NUM_THREADS == 128 || NUM_THREADS == 256);
+  constexpr uint32_t warp_groups = NUM_THREADS / 128;
+  const uint32_t warp_group = threadIdx.x / 128;
   static_assert(CTA_Q <= CTA_K);
   
   const uint32_t warp_idx = (threadIdx.x % 128) / 32;
   const uint32_t lane_id = threadIdx.x % 32;
 
-  constexpr uint32_t num_tiles_q = CTA_Q / 64;
+  constexpr uint32_t num_tiles_q = CTA_Q / (64 * warp_groups);
+  static_assert(num_tiles_q > 0);
   constexpr uint32_t num_tiles_k = CTA_K / 16;
   constexpr uint32_t num_tiles_qk_inner = head_dim / 32;
   constexpr uint32_t num_tiles_v = head_dim / 16;
@@ -156,7 +159,7 @@ __global__ void qk_int8_sv_f8_attn_kernel(const __grid_constant__ CUtensorMap te
 
   extern __shared__ __align__(128) int8_t smem_[];
 
-  int8_t *sQ = (int8_t*)smem_;
+  int8_t *sQ = (int8_t*)smem_ + warp_group * num_tiles_q * 64 * head_dim;
   int8_t *sK = (int8_t*)(smem_ + CTA_Q * head_dim * sizeof(int8_t));
   int8_t *sV = (int8_t*)(smem_ + CTA_Q * head_dim * sizeof(int8_t) + CTA_K * head_dim * sizeof(int8_t));
   half *sO = (half*)smem_;
@@ -172,7 +175,7 @@ __global__ void qk_int8_sv_f8_attn_kernel(const __grid_constant__ CUtensorMap te
   // A 128-row CTA consumes two independently quantized 64-row tiles.
   static_assert(Q_GRAN == QuantGranularity::kPerThread);
   const uint32_t q_scale_tiles = div_ceil(qo_len, 64);
-  const uint32_t q_tile_base = bx * (CTA_Q / 64);
+  const uint32_t q_tile_base = bx * (CTA_Q / 64) + warp_group * num_tiles_q;
   q_scale_idx = (batch_id * num_qo_heads + head_id) * q_scale_tiles * 32
                 + q_tile_base * 32 + warp_idx * 8 + lane_id / 4;
 
@@ -189,7 +192,7 @@ __global__ void qk_int8_sv_f8_attn_kernel(const __grid_constant__ CUtensorMap te
 
   constexpr uint32_t k_scale_advance_offset = (K_GRAN == QuantGranularity::kPerBlock || K_GRAN == QuantGranularity::kPerWarp) ? 1 : 4;
 
-  uint32_t Q_idx_lane_base = bx * CTA_Q + warp_idx * 16 + lane_id / 4;
+  uint32_t Q_idx_lane_base = bx * CTA_Q + warp_group * num_tiles_q * 64 + warp_idx * 16 + lane_id / 4;
 
 #pragma unroll
   for (uint32_t fq = 0; fq < num_tiles_q; fq++)
@@ -278,6 +281,8 @@ __global__ void qk_int8_sv_f8_attn_kernel(const __grid_constant__ CUtensorMap te
     }
     wgmma::warpgroup_commit_batch();
     wgmma::warpgroup_wait<0>();
+    // Both warp groups must finish reading shared K/V before TMA overwrites it.
+    if constexpr (warp_groups > 1) __syncthreads();
 
     // load K
     if (threadIdx.x == 0)
@@ -342,6 +347,8 @@ __global__ void qk_int8_sv_f8_attn_kernel(const __grid_constant__ CUtensorMap te
 
     wgmma::warpgroup_commit_batch();
     wgmma::warpgroup_wait<0>();
+    // Both warp groups must finish reading shared K/V before TMA overwrites it.
+    if constexpr (warp_groups > 1) __syncthreads();
 
 #pragma unroll
     for (uint32_t fq = 0; fq < num_tiles_q; fq++)
@@ -389,6 +396,8 @@ __global__ void qk_int8_sv_f8_attn_kernel(const __grid_constant__ CUtensorMap te
     }
     wgmma::warpgroup_commit_batch();
     wgmma::warpgroup_wait<0>();
+    // Both warp groups must finish reading shared K/V before TMA overwrites it.
+    if constexpr (warp_groups > 1) __syncthreads();
 
     // convert RS to float
     float RS_f32[num_tiles_q][num_tiles_k][8];
@@ -473,6 +482,8 @@ __global__ void qk_int8_sv_f8_attn_kernel(const __grid_constant__ CUtensorMap te
 
     wgmma::warpgroup_commit_batch();
     wgmma::warpgroup_wait<0>();
+    // Both warp groups must finish reading shared K/V before TMA overwrites it.
+    if constexpr (warp_groups > 1) __syncthreads();
 
 #pragma unroll
     for (uint32_t fq = 0; fq < num_tiles_q; fq++)
@@ -516,7 +527,7 @@ __global__ void qk_int8_sv_f8_attn_kernel(const __grid_constant__ CUtensorMap te
     }
   }
 
-  DTypeOut *O_lane_ptr = O + batch_id * stride_bz_o + head_id * stride_h_o + (bx * CTA_Q + warp_idx * 16 + (lane_id / 4)) * stride_seq_o + (lane_id % 4) * 2 ;
+  DTypeOut *O_lane_ptr = O + batch_id * stride_bz_o + head_id * stride_h_o + (bx * CTA_Q + warp_group * num_tiles_q * 64 + warp_idx * 16 + (lane_id / 4)) * stride_seq_o + (lane_id % 4) * 2 ;
 #pragma unroll
   for (uint32_t fq = 0; fq < num_tiles_q; fq++)
   {
@@ -571,18 +582,18 @@ __global__ void qk_int8_sv_f8_attn_kernel(const __grid_constant__ CUtensorMap te
 
 // Deliberately narrow experimental API: BF16 output, NHD, D=128, noncausal,
 // per-thread INT8 Q/K and FP8 V with the original two-level FP32 accumulator.
-template<int CQ>
+template<int CQ, int NT=128>
 void launch(torch::Tensor q, torch::Tensor k, torch::Tensor v, torch::Tensor o,
             torch::Tensor qs, torch::Tensor ks, torch::Tensor vs, float scale) {
   constexpr int CK=128, D=128;
   auto qm=create_tensor_map_4D<CQ,D>((int8_t*)q.data_ptr(),q.size(0),q.size(2),q.size(1),D,q.stride(0),q.stride(2),q.stride(1));
   auto km=create_tensor_map_4D<CK,D>((int8_t*)k.data_ptr(),k.size(0),k.size(2),k.size(1),D,k.stride(0),k.stride(2),k.stride(1));
   auto vm=create_tensor_map_4D<D,CK>((int8_t*)v.data_ptr(),v.size(0),v.size(2),D,v.size(3),v.stride(0),v.stride(2),v.stride(1));
-  auto kernel=qk_int8_sv_f8_attn_kernel<CQ,CK,128,D,QuantGranularity::kPerThread,QuantGranularity::kPerThread,nv_bfloat16,MaskMode::kNone,false,true>;
+  auto kernel=qk_int8_sv_f8_attn_kernel<CQ,CK,NT,D,QuantGranularity::kPerThread,QuantGranularity::kPerThread,nv_bfloat16,MaskMode::kNone,false,true>;
   size_t smem=CQ*D+CK*D*2;
   auto err=cudaFuncSetAttribute(kernel,cudaFuncAttributeMaxDynamicSharedMemorySize,smem);
   TORCH_CHECK(err==cudaSuccess,cudaGetErrorString(err));
-  kernel<<<dim3(div_ceil(q.size(1),CQ),q.size(2),q.size(0)),128,smem,at::cuda::getCurrentCUDAStream()>>>(
+  kernel<<<dim3(div_ceil(q.size(1),CQ),q.size(2),q.size(0)),NT,smem,at::cuda::getCurrentCUDAStream()>>>(
     qm,km,vm,qs.data_ptr<float>(),ks.data_ptr<float>(),vs.data_ptr<float>(),
     (nv_bfloat16*)o.data_ptr(),nullptr,o.stride(0),o.stride(2),o.stride(1),
     q.size(1),k.size(1),q.size(2)/k.size(2),scale);
@@ -607,6 +618,7 @@ void forward(torch::Tensor q,torch::Tensor k,torch::Tensor v,torch::Tensor o,
   CHECK_SHAPE(vs,k.size(0),k.size(2),(int64_t)128);
   if(tile==64) launch<64>(q,k,v,o,qs,ks,vs,scale);
   else if(tile==128) launch<128>(q,k,v,o,qs,ks,vs,scale);
-  else TORCH_CHECK(false,"tile must be 64 or 128");
+  else if(tile==256) launch<128,256>(q,k,v,o,qs,ks,vs,scale);
+  else TORCH_CHECK(false,"tile must be 64, 128 or 256 (two warp groups)");
 }
 PYBIND11_MODULE(TORCH_EXTENSION_NAME,m) {m.def("forward", &forward);}
