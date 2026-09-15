@@ -41,6 +41,8 @@ from sglang.multimodal_gen.runtime.server_args import ServerArgs
 from sglang.multimodal_gen.runtime.utils.logging_utils import init_logger
 from sglang.multimodal_gen.runtime.utils.nvtx_pytorch_hooks import maybe_nvtx_range
 from sglang.multimodal_gen.runtime.utils.perf_logger import StageProfiler
+from sglang.multimodal_gen.runtime.utils.video_progress import write_video_progress
+from sglang.multimodal_gen.runtime.distributed.parallel_state import get_world_rank
 
 logger = init_logger(__name__)
 
@@ -751,6 +753,10 @@ class MiniMaxH3DenoisingStage(DenoisingStage):
             initial_video, initial_audio = _expand_initial_rows(ctx, positive)
             _log_h3_tensor_stats("denoise.initial_video_rows", initial_video)
             _log_h3_tensor_stats("denoise.initial_audio_rows", initial_audio)
+            report_progress = not batch.is_warmup and get_world_rank() == 0
+            total_steps = len(sigmas_video) - 1
+            if report_progress:
+                write_video_progress(batch.request_id, 0, total_steps, "denoising")
             with (
                 maybe_nvtx_range("denoising_loop", self.current_use_nvtx),
                 self.progress_bar(
@@ -762,6 +768,8 @@ class MiniMaxH3DenoisingStage(DenoisingStage):
 
                 def on_step(_step, _video_rows, _audio_rows):
                     progress_bar.update()
+                    if report_progress:
+                        write_video_progress(batch.request_id, _step + 1, total_steps, "denoising")
                     if not batch.is_warmup:
                         self.step_profile()
 
@@ -784,6 +792,8 @@ class MiniMaxH3DenoisingStage(DenoisingStage):
                         batch=batch,
                     ),
                 )
+            if report_progress:
+                write_video_progress(batch.request_id, total_steps, total_steps, "decoding")
             _log_h3_tensor_stats("denoise.final_video_rows", video_rows)
             _log_h3_tensor_stats("denoise.final_audio_rows", audio_rows)
         finally:

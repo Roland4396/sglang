@@ -1,6 +1,7 @@
 import hashlib
 import importlib.util
 import os
+import time
 
 import torch
 import torch.nn as nn
@@ -154,6 +155,7 @@ def _assign_matching_store(vae, mapped: dict, dtype: torch.dtype) -> bool:
     for name, tensor in mapped.items():
         param = state.get(name)
         if param is None or param.shape != tensor.shape or tensor.dtype != dtype:
+            logger.warning("VAE decode store mismatch key=%s expected_shape=%s stored_shape=%s expected_dtype=%s stored_dtype=%s", name, None if param is None else tuple(param.shape), tuple(tensor.shape), dtype, tensor.dtype)
             return False
     vae.load_state_dict(mapped, strict=False, assign=True)
     return True
@@ -426,9 +428,11 @@ class VAELoader(ComponentLoader):
         assert (
             len(safetensors_list) >= 1
         ), f"Found no safetensors files in {component_weights_path}"
+        load_started = time.perf_counter()
         loaded = {}
         for sf_path in safetensors_list:
             loaded.update(safetensors_load_file(sf_path))
+        logger.info("VAE load timing component=%s phase=map_checkpoint seconds=%.3f", component_name, time.perf_counter() - load_started)
         _backfill_ltx2_audio_vae_latent_stats(loaded, component_name)
         strict_load = native_only
         # `loaded` holds views into the safetensors mapping. When the component
@@ -456,12 +460,14 @@ class VAELoader(ComponentLoader):
         )
         if keep_mapping:
             _match_checkpoint_dtypes(loaded, vae.state_dict())
+        assign_started = time.perf_counter()
         vae.load_state_dict(
             loaded,
             strict=strict_load,
             assign=keep_mapping,
         )
 
+        logger.info("VAE load timing component=%s phase=assign_weights seconds=%.3f", component_name, time.perf_counter() - assign_started)
         if not strict_load:
             state_keys = set(vae.state_dict().keys())
             loaded_keys = set(loaded.keys())
@@ -477,8 +483,10 @@ class VAELoader(ComponentLoader):
             if n > 0:
                 logger.info("VAE: converted %d Conv3d weights to channels_last_3d", n)
 
+        cast_started = time.perf_counter()
         _hold_decoder_weights_in_decode_dtype(
             vae, server_args, component_name, component_weights_path
         )
+        logger.info("VAE load timing component=%s phase=decode_dtype seconds=%.3f", component_name, time.perf_counter() - cast_started)
         vae = current_platform.optimize_vae(vae)
         return vae
