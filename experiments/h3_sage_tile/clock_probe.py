@@ -29,6 +29,7 @@ source = generate(root)
 import torch
 from torch.utils.cpp_extension import load
 from sageattention.core import per_thread_int8_triton, per_channel_fp8, sm90_compile
+from sageattention import _qattn_sm90
 
 os.environ.setdefault("MAX_JOBS", "2")
 os.environ["TORCH_CUDA_ARCH_LIST"] = "9.0a"
@@ -42,12 +43,12 @@ module = load(name="h3_clock_probe_20260916_v1", sources=[str(out / "clock_probe
               extra_ldflags=["-lcuda"], verbose=True)
 results = {"build_seconds": time.time() - start, "phases": PHASES,
            "source_sha256": hashlib.sha256(source.encode()).hexdigest(),
-           "installed_binary": sm90_compile.__file__, "probe_binary": module.__file__,
+           "installed_binary": _qattn_sm90.__file__, "probe_binary": module.__file__,
            "attributes_order": ["registers_per_thread", "local_bytes_per_thread", "static_shared_bytes", "resident_ctas_per_sm"],
            "attributes": {str(p): module.attributes(p) for p in (False, True)},
            "scope": "sampled CTA/thread-0 elapsed clocks, not exclusive instruction cycles or performance-event counters",
            "checks": [], "timings": {}, "samples": []}
-for label, path in [("installed", sm90_compile.__file__), ("probe", module.__file__)]:
+for label, path in [("installed", _qattn_sm90.__file__), ("probe", module.__file__)]:
     results[label + "_binary_sha256"] = hashlib.sha256(Path(path).read_bytes()).hexdigest()
     for flag, suffix in [("-res-usage", "resources"), ("-sass", "sass")]:
         with (out / (label + "-" + suffix + ".txt")).open("w") as f:
