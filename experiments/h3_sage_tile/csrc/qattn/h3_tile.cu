@@ -265,7 +265,6 @@ __global__ __launch_bounds__(NUM_THREADS, min_ctas) void qk_int8_sv_f8_attn_kern
     float k_scale = K_scale[k_scale_idx + ((iter - 1) * CTA_K / 128) * k_scale_advance_offset];
 
     if (!lookahead || iter == 1) {
-    if (!lookahead || num_iterations == 1) {
     // wait for K
     wait(&barrier_K, p);
 
@@ -293,8 +292,6 @@ __global__ __launch_bounds__(NUM_THREADS, min_ctas) void qk_int8_sv_f8_attn_kern
     {
       expect_bytes<(CTA_K * head_dim) * sizeof(int8_t)>(&barrier_K);
       load_async_4D(sK, &tensorMapK, &barrier_K, 0, iter * CTA_K, kv_head_id, batch_id);
-    }
-
     }
 
     // convert RS to float
@@ -428,6 +425,7 @@ __global__ __launch_bounds__(NUM_THREADS, min_ctas) void qk_int8_sv_f8_attn_kern
     float k_scale = K_scale[k_scale_idx + ((num_iterations - 1) * CTA_K / 128) * k_scale_advance_offset];
     sm_scale = original_sm_scale;
 
+    if (!lookahead || num_iterations == 1) {
     // wait for K
     wait(&barrier_K, p);
 
@@ -448,6 +446,7 @@ __global__ __launch_bounds__(NUM_THREADS, min_ctas) void qk_int8_sv_f8_attn_kern
     wgmma::warpgroup_wait<0>();
     // Both warp groups must finish reading shared K/V before TMA overwrites it.
     if constexpr (warp_groups > 1) __syncthreads();
+    }
 
     // convert RS to float
     float RS_f32[num_tiles_q][num_tiles_k][8];

@@ -34,7 +34,7 @@ def load_kernel():
     os.environ.setdefault("MAX_JOBS", "2")
     os.environ["TORCH_CUDA_ARCH_LIST"] = "9.0a"
     return load(
-        name="h3_sage_tile_20260916_v6",
+        name="h3_sage_tile_20260916_v7",
         sources=[str(root / "csrc/qattn/h3_tile.cu")],
         extra_cuda_cflags=[
             "-O3", "--use_fast_math", "-U__CUDA_NO_HALF_OPERATORS__",
