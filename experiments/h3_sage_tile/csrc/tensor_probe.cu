@@ -41,7 +41,9 @@ void tensor_probe_kernel(float *out, int iterations) {
       wgmma::warpgroup_wait<0>();
       vresult=r[0][0];
     }
-    result=qresult+vresult;
+    // Every iteration must remain observable. Overwriting result allowed ptxas
+    // to replace three of four unrolled WGMMA groups with dummy operations.
+    result+=qresult+vresult;
   }
   out[blockIdx.x*128+threadIdx.x]=result;
 }

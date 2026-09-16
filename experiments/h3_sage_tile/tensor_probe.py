@@ -49,7 +49,7 @@ with torch.inference_mode():
     times={f'{m}:{c}':[] for m,c in variants}
     for m,c in variants:
         module.run(output,blocks,iterations,m,c)
-        assert (output==(256 if m==2 else 128)).all().item(), (m,c,'analytical check failed')
+        assert (output==iterations*(256 if m==2 else 128)).all().item(), (m,c,'all-iterations checksum failed')
         for _ in range(2):module.run(output,blocks,iterations,m,c)
     torch.cuda.synchronize()
     for r in range(9):
