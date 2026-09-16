@@ -20,11 +20,15 @@ parser.add_argument("--output-dir", required=True, type=Path)
 parser.add_argument("--repeats", type=int, default=9)
 parser.add_argument("--stamp-pair", nargs=2, type=int, help="Only two markers, for local observer-effect control")
 parser.add_argument("--cta-stride", type=int, default=128)
+parser.add_argument("--matrix-split", action="store_true", help="Separate WGMMA issue/commit and drain clocks; requires SASS audit")
 args = parser.parse_args()
 root = Path(__file__).resolve().parent
 out = args.output_dir
 out.mkdir(parents=True, exist_ok=True)
 assert not (out / "result.json").exists(), "Choose a new output directory"
+if args.matrix_split:
+    from matrix_clock_source import generate, PHASES
+num_timestamps = len(PHASES) + 1
 source = generate(root, args.stamp_pair)
 (out / "clock_probe.generated.cu").write_text(source)
 
@@ -46,6 +50,7 @@ module = load(name="h3_clock_probe_20260916_v1", sources=[str(out / "clock_probe
 results = {"build_seconds": time.time() - start,
            "phases": PHASES if args.stamp_pair is None else [f"stamp_{args.stamp_pair[0]}_to_{args.stamp_pair[1]}"],
            "stamp_pair": args.stamp_pair, "cta_stride": args.cta_stride,
+           "matrix_split": args.matrix_split,
            "source_sha256": hashlib.sha256(source.encode()).hexdigest(),
            "installed_binary": _qattn_sm90.__file__, "probe_binary": module.__file__,
            "attributes_order": ["registers_per_thread", "local_bytes_per_thread", "static_shared_bytes", "resident_ctas_per_sm"],
@@ -76,7 +81,7 @@ def prepare(n, heads):
     torch.cuda.synchronize()  # quantization is outside timed/probed attention
     tensors = qi, ki, vi, qs, ks, vs
     buffers = {name: torch.empty_like(q) for name in ("installed", "control", "probe_disabled", "probe_active")}
-    stamps = torch.zeros(math.ceil(math.ceil(n / 64) * heads / args.cta_stride), 8, device="cuda", dtype=torch.int64)
+    stamps = torch.zeros(math.ceil(math.ceil(n / 64) * heads / args.cta_stride), num_timestamps, device="cuda", dtype=torch.int64)
     return tensors, buffers, stamps
 
 
@@ -153,7 +158,7 @@ with torch.inference_mode():
         for repeat in range(2):
             stamps.zero_()
             funcs(tensors, buffers, stamps, iteration)["probe_active"]()
-            clocks = stamps.cpu()[:, args.stamp_pair or list(range(8))]
+            clocks = stamps.cpu()[:, args.stamp_pair or list(range(num_timestamps))]
             assert (clocks > 0).all().item(), "Missing stamps"
             differences = clocks[:, 1:] - clocks[:, :-1]
             assert (differences > 0).all().item(), "Nonmonotonic clock samples"
