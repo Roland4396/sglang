@@ -95,6 +95,22 @@ with torch.inference_mode():
         torch.cuda.synchronize()
         for name, value in buffers.items():
             assert torch.isfinite(value).all().item(), (n, name, "nonfinite")
+            if not torch.equal(value, buffers["installed"]):
+                def delta(a, b):
+                    af, bf = a.float(), b.float()
+                    d = af - bf
+                    return {"different": (a != b).sum().item(), "elements": a.numel(),
+                            "max_abs": d.abs().max().item(),
+                            "relative_l2": (d.norm() / bf.norm()).item()}
+                failure = {"n": n, "name": name, "variants": {}, "repeat_stable": {}}
+                for variant, tensor in buffers.items():
+                    failure["variants"][variant] = delta(tensor, buffers["installed"])
+                    previous = tensor.clone()
+                    fns[variant](); torch.cuda.synchronize()
+                    failure["repeat_stable"][variant] = delta(tensor, previous)
+                results["numerical_failure"] = failure
+                save()
+                print("NUMERICAL_FAILURE", json.dumps(failure), flush=True)
             assert torch.equal(value, buffers["installed"]), (n, name, "numerical mismatch")
         stream = torch.cuda.Stream()
         stream.wait_stream(torch.cuda.current_stream())
