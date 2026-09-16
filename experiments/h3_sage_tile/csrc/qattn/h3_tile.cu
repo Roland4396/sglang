@@ -125,7 +125,7 @@ __device__ __forceinline__ void arrive(uint64_t* bar) {
     );
 }
 
-template<uint32_t CTA_Q, uint32_t CTA_K, uint32_t NUM_THREADS, uint32_t head_dim, QuantGranularity Q_GRAN, QuantGranularity K_GRAN, typename DTypeOut, MaskMode mask_mode = MaskMode::kNone, bool return_lse = false, bool fuse_v_scale=false, bool split_pv=false, int min_ctas=1>
+template<uint32_t CTA_Q, uint32_t CTA_K, uint32_t NUM_THREADS, uint32_t head_dim, QuantGranularity Q_GRAN, QuantGranularity K_GRAN, typename DTypeOut, MaskMode mask_mode = MaskMode::kNone, bool return_lse = false, bool fuse_v_scale=false, bool split_pv=false, int min_ctas=1, bool lookahead=false>
 __global__ __launch_bounds__(NUM_THREADS, min_ctas) void qk_int8_sv_f8_attn_kernel(const __grid_constant__ CUtensorMap tensorMapQ,
                                         const __grid_constant__ CUtensorMap tensorMapK,
                                         const __grid_constant__ CUtensorMap tensorMapV,
@@ -135,6 +135,7 @@ __global__ __launch_bounds__(NUM_THREADS, min_ctas) void qk_int8_sv_f8_attn_kern
                                         float sm_scale)
 {
   static_assert(NUM_THREADS == 128 || NUM_THREADS == 256);
+  static_assert(!lookahead || (NUM_THREADS == 128 && CTA_Q == 64 && CTA_K == 128 && !split_pv));
   constexpr uint32_t warp_groups = NUM_THREADS / 128;
   const uint32_t warp_group = threadIdx.x / 128;
   static_assert(CTA_Q <= CTA_K);
@@ -263,6 +264,8 @@ __global__ __launch_bounds__(NUM_THREADS, min_ctas) void qk_int8_sv_f8_attn_kern
 
     float k_scale = K_scale[k_scale_idx + ((iter - 1) * CTA_K / 128) * k_scale_advance_offset];
 
+    if (!lookahead || iter == 1) {
+    if (!lookahead || num_iterations == 1) {
     // wait for K
     wait(&barrier_K, p);
 
@@ -284,11 +287,14 @@ __global__ __launch_bounds__(NUM_THREADS, min_ctas) void qk_int8_sv_f8_attn_kern
     // Both warp groups must finish reading shared K/V before TMA overwrites it.
     if constexpr (warp_groups > 1) __syncthreads();
 
+    }
     // load K
     if (threadIdx.x == 0)
     {
       expect_bytes<(CTA_K * head_dim) * sizeof(int8_t)>(&barrier_K);
       load_async_4D(sK, &tensorMapK, &barrier_K, 0, iter * CTA_K, kv_head_id, batch_id);
+    }
+
     }
 
     // convert RS to float
@@ -305,6 +311,22 @@ __global__ __launch_bounds__(NUM_THREADS, min_ctas) void qk_int8_sv_f8_attn_kern
           RS_f32[fq][fk][k] = __int2float_rz(RS[fq][fk][k]);
         }
       }
+    }
+
+    if constexpr (lookahead) {
+      // K(iter) was prefetched after QK(iter-1). Keep its QK accumulator
+      // live while CUDA cores execute softmax for the previous block.
+      // Single shared K buffer is safe: all users of its previous contents
+      // completed before the TMA refill. No pending accumulator is read here.
+      wait(&barrier_K, p ^ 1);
+      wgmma::warpgroup_arrive();
+      wgmma::wgmma_s8s8s32<CTA_K, 0, head_dim>(RS[0], sQ, sK);
+#pragma unroll
+      for (int k_it = 1; k_it < num_tiles_qk_inner; k_it++)
+        wgmma::wgmma_s8s8s32<CTA_K, 1, head_dim>(RS[0], sQ + k_it * 32, sK + k_it * 32);
+      wgmma::warpgroup_commit_batch();
+      // Deliberately no wait: the PV wait below drains both groups before
+      // RS can be consumed or the shared K buffer can be overwritten.
     }
 
 #pragma unroll
@@ -638,14 +660,14 @@ __global__ __launch_bounds__(NUM_THREADS, min_ctas) void qk_int8_sv_f8_attn_kern
 
 // Deliberately narrow experimental API: BF16 output, NHD, D=128, noncausal,
 // per-thread INT8 Q/K and FP8 V with the original two-level FP32 accumulator.
-template<int CQ, int NT=128, bool SplitPV=false, int CK=128, int MinCTAs=1>
+template<int CQ, int NT=128, bool SplitPV=false, int CK=128, int MinCTAs=1, bool Lookahead=false>
 void launch(torch::Tensor q, torch::Tensor k, torch::Tensor v, torch::Tensor o,
             torch::Tensor qs, torch::Tensor ks, torch::Tensor vs, float scale) {
   constexpr int D=128;
   auto qm=create_tensor_map_4D<CQ,D>((int8_t*)q.data_ptr(),q.size(0),q.size(2),q.size(1),D,q.stride(0),q.stride(2),q.stride(1));
   auto km=create_tensor_map_4D<CK,D>((int8_t*)k.data_ptr(),k.size(0),k.size(2),k.size(1),D,k.stride(0),k.stride(2),k.stride(1));
   auto vm=create_tensor_map_4D<D,CK>((int8_t*)v.data_ptr(),v.size(0),v.size(2),D,v.size(3),v.stride(0),v.stride(2),v.stride(1));
-  auto kernel=qk_int8_sv_f8_attn_kernel<CQ,CK,NT,D,QuantGranularity::kPerThread,QuantGranularity::kPerThread,nv_bfloat16,MaskMode::kNone,false,true,SplitPV,MinCTAs>;
+  auto kernel=qk_int8_sv_f8_attn_kernel<CQ,CK,NT,D,QuantGranularity::kPerThread,QuantGranularity::kPerThread,nv_bfloat16,MaskMode::kNone,false,true,SplitPV,MinCTAs,Lookahead>;
   size_t smem=CQ*D+CK*D*2;
   auto err=cudaFuncSetAttribute(kernel,cudaFuncAttributeMaxDynamicSharedMemorySize,smem);
   TORCH_CHECK(err==cudaSuccess,cudaGetErrorString(err));
@@ -686,6 +708,9 @@ void forward(torch::Tensor q,torch::Tensor k,torch::Tensor v,torch::Tensor o,
   else if(tile==72) launch<64,128,true,128,3>(q,k,v,o,qs,ks,vs,scale);
   else if(tile==73) launch<64,128,false,64,3>(q,k,v,o,qs,ks,vs,scale);
   else if(tile==74) launch<64,128,true,64,3>(q,k,v,o,qs,ks,vs,scale);
+  else if(tile==81) launch<64,128,false,128,1,true>(q,k,v,o,qs,ks,vs,scale);
+  else if(tile==82) launch<64,128,false,128,2,true>(q,k,v,o,qs,ks,vs,scale);
+  else if(tile==83) launch<64,128,false,128,3,true>(q,k,v,o,qs,ks,vs,scale);
   else TORCH_CHECK(false,"unsupported experimental tile");
 }
 PYBIND11_MODULE(TORCH_EXTENSION_NAME,m) {m.def("forward", &forward);}
