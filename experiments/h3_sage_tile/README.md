@@ -130,3 +130,37 @@ A further SoA shared-scratch/deferred-rescaling pipeline (selectors84/85) also
 passed all bitwise checks, but took368.643/533.639ms vs306.206ms stock on the real
 shape. It stays microbenchmark-only. No tested candidate achieved material video
 acceleration; these experiments must not be advertised as a production speedup.
+
+### Restricted-counter hardware diagnostics
+
+`clock_probe.py` generates a separate CUDA extension; it never patches the installed
+Sage package or starts H3. Use Ansible to select an idle GPU across the pool, expose
+only that GPU, set `CUDA_HOME`, and invoke the node's H3 Python environment:
+
+```sh
+python experiments/h3_sage_tile/clock_probe.py --output-dir UNIQUE_OUTPUT
+python experiments/h3_sage_tile/clock_probe.py --stamp-pair 0 7 --output-dir UNIQUE_PAIR
+python experiments/h3_sage_tile/clock_probe.py --stamp-pair 3 4 --output-dir UNIQUE_SOFTMAX
+python experiments/h3_sage_tile/clock_probe.py --cta-stride 1024 --output-dir UNIQUE_SPARSE
+python experiments/h3_sage_tile/tensor_probe.py --output-dir UNIQUE_TENSOR
+```
+
+Only synthetic tensors are used, with captured rank shape `(1,109129,14,128)`.
+The clock probe requires bitwise agreement with installed Sage at seven lengths
+and on nondefault streams before collecting timings. It records installed/control/
+instrumented-disabled/instrumented-active timing distributions, CUDA resource and
+occupancy attributes, SASS, and sampled SM cycles. Preserve failed output directories.
+
+The first probe inhibited contraction of output rescaling and PV accumulation:
+SASS had 64 fewer FFMAs and 64 extra FMUL/FADD pairs, and N=4096 differed in
+134/7340032 BF16 elements. The generator now explicitly preserves the original
+fused operation in both diagnostic control and probe; do not relax the comparison
+to work around an instrumentation error. Production source remains untouched.
+
+Clock intervals contain scheduling and probe overhead, not exclusive instruction
+cycles or NVIDIA stall counters. Inspect SASS marker placement and compare paired
+markers/different sampling densities: a small global slowdown does not prove local
+samples are unbiased. Do not convert interval percentages to Tensor Core utilization,
+L2 hit rates, or attention HBM bandwidth. `tensor_probe.py` is an empirical synthetic
+calibration, not a theoretical peak or a functional attention replacement. Its
+launch-bounds parameter is not itself a measurement of resident blocks.
