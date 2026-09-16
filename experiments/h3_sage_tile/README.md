@@ -164,3 +164,31 @@ samples are unbiased. Do not convert interval percentages to Tensor Core utiliza
 L2 hit rates, or attention HBM bandwidth. `tensor_probe.py` is an empirical synthetic
 calibration, not a theoretical peak or a functional attention replacement. Its
 launch-bounds parameter is not itself a measurement of resident blocks.
+
+#### Follow-up: separate matrix drain and invalidate the old calibration
+
+The original tensor calibration was invalid: it overwrote its observable result
+on each iteration. SASS showed a loop decrement of four but three dummy
+`HGMMA.64x8x16.F16 RZ` groups and just one intended full-matrix group. The old
+~79ms alternating-QK/PV result and nominal TOPS must not be used. Each iteration
+now contributes to a checked checksum; the corrected mixed median is298.224ms.
+The known dummy lowering is rejected by `tensor_sass_audit.py`; static guards
+do not replace inspection of loop trip counts when compiler versions change.
+
+`clock_probe.py --matrix-split` adds pre-drain markers. Paired checks use
+`--stamp-pair 2 3` (QK drain) and `--stamp-pair 7 8` (PV drain). Audit SASS:
+the first clock must precede DEPBar and follow the four intended matrix issues.
+These windows include probe/scheduling overhead, not exclusive hardware stalls.
+
+`refill_probe.py` is an ablation on exactly repeating **quantized** K/V tiles,
+with sequence length rounded to109184 (same CTA grid/K-iteration count as109129).
+It replaces K/V/both repeated TMA transactions with zero-byte barrier arrivals,
+retaining the first real tile, phase waits, and all matrix math. All four versions
+match installed Sage bitwise on five periodic-input lengths/nondefault streams.
+Normal301.389ms vs no-K/V-refill301.422ms: no material speedup in this control.
+This is emphatically NOT a valid optimization for arbitrary/video inputs.
+
+Together, the tests support matrix-throughput-dominated behavior for this sampled
+shape on this H20, not a large avoidable repeated-transfer cost. They do not prove
+an absolute whole-model lower bound, every layer's behavior, or impossibility of
+better algorithms. Production was not changed and no new video speedup is claimed.

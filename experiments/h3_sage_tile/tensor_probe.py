@@ -11,6 +11,7 @@ import os
 from pathlib import Path
 import statistics
 import subprocess
+from tensor_sass_audit import audit_tensor_sass
 
 parser=argparse.ArgumentParser()
 parser.add_argument('--output-dir',type=Path,required=True)
@@ -31,7 +32,8 @@ results={'scope':'achieved synthetic WGMMA throughput; NOT theoretical peak, ten
          'binary_sha256':hashlib.sha256(Path(module.__file__).read_bytes()).hexdigest()}
 for flag,label in [('-res-usage','resources'),('-sass','sass')]:
     with (out/('tensor-'+label+'.txt')).open('w') as f:
-        subprocess.run([os.environ['CUDA_HOME']+'/bin/cuobjdump',flag,module.__file__],stdout=f,stderr=subprocess.STDOUT,check=True)
+            subprocess.run([os.environ['CUDA_HOME']+'/bin/cuobjdump',flag,module.__file__],stdout=f,stderr=subprocess.STDOUT,check=True)
+results['sass_audit'] = audit_tensor_sass((out/'tensor-sass.txt').read_text())
 
 
 def elapsed(fn):
@@ -62,7 +64,8 @@ with torch.inference_mode():
         med=statistics.median(times[f'{m}:{c}'])
         rows.append({'mode':['int8_qk_only','fp8_pv_only','alternating_qk_pv'][m],
                      'min_ctas':c,'samples_ms':times[f'{m}:{c}'],'median_ms':med,
-                     'operations':ops,'achieved_teraops_per_s':ops/(med*1e9),'analytical_output_check':True})
+                     'operations':ops,'achieved_teraops_per_s':ops/(med*1e9),'analytical_output_check':True,
+                     'expected_all_iterations_checksum':iterations*(256 if m==2 else 128)})
     results.update(blocks=blocks,iterations=iterations,tensor=rows)
     # Both arrays exceed the GPU's L2 capacity. This is bulk copy throughput,
     # not a measurement of attention's TMA/L2/shared-memory path.
