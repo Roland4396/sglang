@@ -125,7 +125,7 @@ __device__ __forceinline__ void arrive(uint64_t* bar) {
     );
 }
 
-template<uint32_t CTA_Q, uint32_t CTA_K, uint32_t NUM_THREADS, uint32_t head_dim, QuantGranularity Q_GRAN, QuantGranularity K_GRAN, typename DTypeOut, MaskMode mask_mode = MaskMode::kNone, bool return_lse = false, bool fuse_v_scale=false, bool split_pv=false, int min_ctas=1, bool lookahead=false>
+template<uint32_t CTA_Q, uint32_t CTA_K, uint32_t NUM_THREADS, uint32_t head_dim, QuantGranularity Q_GRAN, QuantGranularity K_GRAN, typename DTypeOut, MaskMode mask_mode = MaskMode::kNone, bool return_lse = false, bool fuse_v_scale=false, bool split_pv=false, int min_ctas=1, bool lookahead=false, bool scratch_pipeline=false>
 __global__ __launch_bounds__(NUM_THREADS, min_ctas) void qk_int8_sv_f8_attn_kernel(const __grid_constant__ CUtensorMap tensorMapQ,
                                         const __grid_constant__ CUtensorMap tensorMapK,
                                         const __grid_constant__ CUtensorMap tensorMapV,
@@ -136,6 +136,7 @@ __global__ __launch_bounds__(NUM_THREADS, min_ctas) void qk_int8_sv_f8_attn_kern
 {
   static_assert(NUM_THREADS == 128 || NUM_THREADS == 256);
   static_assert(!lookahead || (NUM_THREADS == 128 && CTA_Q == 64 && CTA_K == 128 && !split_pv));
+  static_assert(!scratch_pipeline || lookahead);
   constexpr uint32_t warp_groups = NUM_THREADS / 128;
   const uint32_t warp_group = threadIdx.x / 128;
   static_assert(CTA_Q <= CTA_K);
@@ -164,6 +165,10 @@ __global__ __launch_bounds__(NUM_THREADS, min_ctas) void qk_int8_sv_f8_attn_kern
   int8_t *sK = (int8_t*)(smem_ + CTA_Q * head_dim * sizeof(int8_t));
   int8_t *sV = (int8_t*)(smem_ + CTA_Q * head_dim * sizeof(int8_t) + CTA_K * head_dim * sizeof(int8_t));
   half *sO = (half*)smem_;
+  // SoA layout avoids a 32-way shared-bank conflict. Each thread owns its
+  // scratch elements; no other warp reads them, so no CTA barrier is needed.
+  volatile float *scratch_o = reinterpret_cast<volatile float*>(smem_ + (CTA_Q + 2 * CTA_K) * head_dim);
+  volatile int32_t *scratch_s = reinterpret_cast<volatile int32_t*>(smem_ + (CTA_Q + 2 * CTA_K) * head_dim);
 
   int32_t RS[num_tiles_q][num_tiles_k][8];
   float RO[num_tiles_q][num_tiles_v][8];
@@ -294,6 +299,18 @@ __global__ __launch_bounds__(NUM_THREADS, min_ctas) void qk_int8_sv_f8_attn_kern
       load_async_4D(sK, &tensorMapK, &barrier_K, 0, iter * CTA_K, kv_head_id, batch_id);
     }
 
+    if constexpr (scratch_pipeline) {
+      if (iter > 1) {
+#pragma unroll
+        for (int i = 0; i < 64; ++i) RS[0][i / 8][i % 8] = scratch_s[i * NUM_THREADS + threadIdx.x];
+      }
+      // RO is dead until restored after the overlapping softmax. Reuse this
+      // exact scratch region for the next QK accumulator before issuing PV.
+#pragma unroll
+      for (int i = 0; i < 64; ++i) scratch_o[i * NUM_THREADS + threadIdx.x] = RO[0][i / 8][i % 8];
+    }
+    float deferred_scale[2];
+
     // convert RS to float
     float RS_f32[num_tiles_q][num_tiles_k][8];
 #pragma unroll
@@ -329,8 +346,13 @@ __global__ __launch_bounds__(NUM_THREADS, min_ctas) void qk_int8_sv_f8_attn_kern
 #pragma unroll
     for (uint32_t fq = 0; fq < num_tiles_q; fq++) {
       const float tile_sm_scale = original_sm_scale * (q_scales[fq] * k_scale);
+      if constexpr (scratch_pipeline) {
+        update_mdo<1, num_tiles_k, num_tiles_v, false, true, false, true>(
+            RS_f32 + fq, RO + fq, m + fq, d + fq, tile_sm_scale, deferred_scale);
+      } else {
       update_mdo<1, num_tiles_k, num_tiles_v, false, true, false>(
           RS_f32 + fq, RO + fq, m + fq, d + fq, tile_sm_scale);
+      }
     }
 
     // accumulate d on thread basis
@@ -347,6 +369,16 @@ __global__ __launch_bounds__(NUM_THREADS, min_ctas) void qk_int8_sv_f8_attn_kern
 
     uint32_t RS_f8[num_tiles_q][num_tiles_pv_inner][4];
     RS_32_to_8<num_tiles_q, num_tiles_k>(RS_f32, RS_f8);
+
+    if constexpr (scratch_pipeline) {
+      wgmma::warpgroup_wait<0>();  // next QK is complete before scratch store
+#pragma unroll
+      for (int i = 0; i < 64; ++i) RO[0][i / 8][i % 8] = scratch_o[i * NUM_THREADS + threadIdx.x];
+#pragma unroll
+      for (int i = 0; i < 64; ++i) scratch_s[i * NUM_THREADS + threadIdx.x] = RS[0][i / 8][i % 8];
+#pragma unroll
+      for (int i = 0; i < 64; ++i) RO[0][i / 8][i % 8] *= deferred_scale[(i % 4) / 2];
+    }
 
     // wait for V
     wait(&barrier_V, p);
@@ -425,6 +457,12 @@ __global__ __launch_bounds__(NUM_THREADS, min_ctas) void qk_int8_sv_f8_attn_kern
     float k_scale = K_scale[k_scale_idx + ((num_iterations - 1) * CTA_K / 128) * k_scale_advance_offset];
     sm_scale = original_sm_scale;
 
+    if constexpr (scratch_pipeline) {
+      if (num_iterations > 1) {
+#pragma unroll
+        for (int i = 0; i < 64; ++i) RS[0][i / 8][i % 8] = scratch_s[i * NUM_THREADS + threadIdx.x];
+      }
+    }
     if (!lookahead || num_iterations == 1) {
     // wait for K
     wait(&barrier_K, p);
@@ -659,15 +697,15 @@ __global__ __launch_bounds__(NUM_THREADS, min_ctas) void qk_int8_sv_f8_attn_kern
 
 // Deliberately narrow experimental API: BF16 output, NHD, D=128, noncausal,
 // per-thread INT8 Q/K and FP8 V with the original two-level FP32 accumulator.
-template<int CQ, int NT=128, bool SplitPV=false, int CK=128, int MinCTAs=1, bool Lookahead=false>
+template<int CQ, int NT=128, bool SplitPV=false, int CK=128, int MinCTAs=1, bool Lookahead=false, bool ScratchPipeline=false>
 void launch(torch::Tensor q, torch::Tensor k, torch::Tensor v, torch::Tensor o,
             torch::Tensor qs, torch::Tensor ks, torch::Tensor vs, float scale) {
   constexpr int D=128;
   auto qm=create_tensor_map_4D<CQ,D>((int8_t*)q.data_ptr(),q.size(0),q.size(2),q.size(1),D,q.stride(0),q.stride(2),q.stride(1));
   auto km=create_tensor_map_4D<CK,D>((int8_t*)k.data_ptr(),k.size(0),k.size(2),k.size(1),D,k.stride(0),k.stride(2),k.stride(1));
   auto vm=create_tensor_map_4D<D,CK>((int8_t*)v.data_ptr(),v.size(0),v.size(2),D,v.size(3),v.stride(0),v.stride(2),v.stride(1));
-  auto kernel=qk_int8_sv_f8_attn_kernel<CQ,CK,NT,D,QuantGranularity::kPerThread,QuantGranularity::kPerThread,nv_bfloat16,MaskMode::kNone,false,true,SplitPV,MinCTAs,Lookahead>;
-  size_t smem=CQ*D+CK*D*2;
+  auto kernel=qk_int8_sv_f8_attn_kernel<CQ,CK,NT,D,QuantGranularity::kPerThread,QuantGranularity::kPerThread,nv_bfloat16,MaskMode::kNone,false,true,SplitPV,MinCTAs,Lookahead,ScratchPipeline>;
+  size_t smem=CQ*D+CK*D*2+(ScratchPipeline ? CQ*CK*sizeof(int32_t) : 0);
   auto err=cudaFuncSetAttribute(kernel,cudaFuncAttributeMaxDynamicSharedMemorySize,smem);
   TORCH_CHECK(err==cudaSuccess,cudaGetErrorString(err));
   kernel<<<dim3(div_ceil(q.size(1),CQ),q.size(2),q.size(0)),NT,smem,at::cuda::getCurrentCUDAStream()>>>(
@@ -710,6 +748,8 @@ void forward(torch::Tensor q,torch::Tensor k,torch::Tensor v,torch::Tensor o,
   else if(tile==81) launch<64,128,false,128,1,true>(q,k,v,o,qs,ks,vs,scale);
   else if(tile==82) launch<64,128,false,128,2,true>(q,k,v,o,qs,ks,vs,scale);
   else if(tile==83) launch<64,128,false,128,3,true>(q,k,v,o,qs,ks,vs,scale);
+  else if(tile==84) launch<64,128,false,128,2,true,true>(q,k,v,o,qs,ks,vs,scale);
+  else if(tile==85) launch<64,128,false,128,3,true,true>(q,k,v,o,qs,ks,vs,scale);
   else TORCH_CHECK(false,"unsupported experimental tile");
 }
 void transpose_pad_permute_cuda(torch::Tensor, torch::Tensor, int);

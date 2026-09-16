@@ -351,8 +351,8 @@ __device__ __forceinline__ void apply_out_of_bound_mask(const uint32_t &K_idx_la
 }
 
 // for DTypeQKAccum float
-template <uint32_t num_tiles_q, uint32_t num_tiles_k, uint32_t num_tiles_v, bool use_half_o_scale, bool exp_offset, bool fuse_scale=false, typename DTypeSVAccum>
-__device__ __forceinline__ void update_mdo(float RS[][num_tiles_k][8], DTypeSVAccum RO[][num_tiles_v][8], float m[][2], float d[][2], const float &sm_scale)
+template <uint32_t num_tiles_q, uint32_t num_tiles_k, uint32_t num_tiles_v, bool use_half_o_scale, bool exp_offset, bool fuse_scale=false, bool defer_ro=false, typename DTypeSVAccum>
+__device__ __forceinline__ void update_mdo(float RS[][num_tiles_k][8], DTypeSVAccum RO[][num_tiles_v][8], float m[][2], float d[][2], const float &sm_scale, float *deferred_o_scale=nullptr)
 {
   static_assert(std::is_same<DTypeSVAccum, half>::value || (!use_half_o_scale));
 #pragma unroll
@@ -405,6 +405,9 @@ __device__ __forceinline__ void update_mdo(float RS[][num_tiles_k][8], DTypeSVAc
         o_scale2 = __floats2half2_rn(o_scale, o_scale);
       }
 
+      if constexpr (defer_ro) {
+        deferred_o_scale[fq * 2 + k] = o_scale;
+      } else {
       // update RO
 #pragma unroll
       for (uint32_t fv = 0; fv < num_tiles_v; fv++)
@@ -431,6 +434,8 @@ __device__ __forceinline__ void update_mdo(float RS[][num_tiles_k][8], DTypeSVAc
             RO[fq][fv][k * 2 + 5] = __float2half_rn(__half2float(RO[fq][fv][k * 2 + 5]) * o_scale);
           }
         }
+      }
+
       }
 
       // raise RS to exponent
