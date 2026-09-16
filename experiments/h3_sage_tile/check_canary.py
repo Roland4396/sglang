@@ -24,6 +24,13 @@ with torch.inference_mode():
         v = torch.zeros(1, 4096, 14, 128, device="cuda", dtype=torch.bfloat16)
         torch.cuda.synchronize()
         stream = torch.cuda.Stream()
+        # Warm this exact stream's allocator: a fresh cudaMalloc can hide the
+        # race by synchronizing the device before the legacy-stream launches.
+        with torch.cuda.stream(stream):
+            warm = (per_channel_fp8(v, tensor_layout="NHD", smooth_v=False)
+                    if name == "installed" else canary.quantize_v(v))
+        torch.cuda.synchronize()
+        del warm
         with torch.cuda.stream(stream):
             torch.cuda._sleep(50_000_000)
             v.fill_(1)

@@ -91,3 +91,42 @@ python3 experiments/h3_sage_tile/trace_summary.py <trace.json.gz> <summary.json>
 The summary separates device busy unions, cumulative kernel time and inclusive CPU
 scopes. Candidate acceptance additionally needs representative video quality and paired,
 unprofiled, warm **full-pipeline** measurements. Kernel numbers alone do not meet that gate.
+
+### Software-pipeline and full-H3 canary follow-up
+
+Tile selectors 81/82/83 add next-block QK lookahead during current-block softmax.
+They preserve K128 quantization/block order and FP32+FP32 PV accumulation. The
+first prologue scope bug was caught by N=129; corrected variants pass bitwise
+checks but do not beat selector 71 on H20. The real-shape v8 medians were stock
+308.495ms, selector71 301.327ms, lookahead81 305.654ms, lookahead82 305.751ms,
+lookahead83 349.993ms. Lookahead raises register pressure (243 vs168 registers);
+forcing min3 CTAs produces spills. These are microbenchmarks, not video speedups.
+
+The opt-in backend (`SGLANG_H3_SAGE_CANARY_TILE=71`) now permits complete Comfy
+A/B validation. It defaults off; unsupported shapes/causal/LSE calls use stock.
+`check_canary.py` tests the entire quantization+attention wrapper, including
+nondefault streams. The installed Sage V quantizers launch on legacy stream 0;
+a warmed delayed-producer trace exposed cross-stream consumption of unfinished
+V. `csrc/fused/v_quant.cu` contains the original Sage kernels (same upstream
+license/revision as the other vendored headers) with current-stream launches.
+The canary does not globally patch the installed Sage package.
+
+Run `comfy_pair.py --label <unique-label> --output-dir <durable-directory>
+--expected-tile 71` on the selected node **through the Ansible inventory**, after
+checking pool/application activity and deploying a reviewed exact revision. It
+uses a fixed synthetic robot prompt, 15s, 50 real steps, seed20260916, no script
+reading, and records real native Comfy progress plus exact operation IDs. Retrieve
+MP4s by operation ID rather than completion-order filenames. Existing production
+settings must not be changed on the basis of the microbenchmark alone.
+
+
+Full-video result for the opt-in selector71/current-stream-quantizer canary:
+stock warm381.338s vs canary382.006s end-to-end (15s,50 real steps,TP2×Ulysses2).
+Native denoising347.405s vs346.763s is not a meaningful gain. First runs462.860s
+vs489.211s. Both candidate MP4s are byte-identical to their respective stock
+artifacts. The candidate was therefore rolled back; production remains stock.
+
+A further SoA shared-scratch/deferred-rescaling pipeline (selectors84/85) also
+passed all bitwise checks, but took368.643/533.639ms vs306.206ms stock on the real
+shape. It stays microbenchmark-only. No tested candidate achieved material video
+acceleration; these experiments must not be advertised as a production speedup.
