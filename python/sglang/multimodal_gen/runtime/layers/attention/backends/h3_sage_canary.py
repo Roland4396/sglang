@@ -34,8 +34,8 @@ def load_kernel():
     os.environ.setdefault("MAX_JOBS", "2")
     os.environ["TORCH_CUDA_ARCH_LIST"] = "9.0a"
     return load(
-        name="h3_sage_tile_20260916_v7",
-        sources=[str(root / "csrc/qattn/h3_tile.cu")],
+        name="h3_sage_tile_20260916_v8",
+        sources=[str(root / "csrc/qattn/h3_tile.cu"), str(root / "csrc/fused/v_quant.cu")],
         extra_cuda_cflags=[
             "-O3", "--use_fast_math", "-U__CUDA_NO_HALF_OPERATORS__",
             "-U__CUDA_NO_HALF_CONVERSIONS__", "-U__CUDA_NO_BFLOAT16_CONVERSIONS__",
@@ -47,7 +47,7 @@ def load_kernel():
 
 
 def forward(q, k, v, *, sm_scale, tile):
-    from sageattention.core import per_channel_fp8, per_thread_int8_triton
+    from sageattention.core import per_thread_int8_triton
 
     with torch.cuda.device(q.device):
         kernel = load_kernel()
@@ -59,8 +59,20 @@ def forward(q, k, v, *, sm_scale, tile):
         pad = (-k.shape[1]) % 128
         if pad:
             v = torch.cat([v, v.new_zeros(v.shape[0], pad, v.shape[2], 128)], dim=1)
-        vi, vs, _ = per_channel_fp8(v, tensor_layout="NHD", smooth_v=False)
+        vi, vs = quantize_v(v, kernel)
         out = torch.empty(q.shape, dtype=q.dtype, device=q.device)
         kernel.forward(qi, ki, vi, out, qs, ks, vs,
                        128 ** -0.5 if sm_scale is None else sm_scale, tile)
         return out
+
+
+def quantize_v(v, kernel=None):
+    """Sage's exact V transform, but both CUDA launches use the caller's stream."""
+    kernel = load_kernel() if kernel is None else kernel
+    b, n, h, d = v.shape
+    permuted = torch.empty((b, d, h, n), dtype=v.dtype, device=v.device)
+    vi = torch.empty(permuted.shape, dtype=torch.float8_e4m3fn, device=v.device)
+    vs = torch.empty((b, h, d), dtype=torch.float32, device=v.device)
+    kernel.transpose_pad_permute(v, permuted, 0)
+    kernel.scale_fuse_quant(permuted, vi, vs, n, 448.0, 0)
+    return vi, vs

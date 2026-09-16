@@ -712,4 +712,10 @@ void forward(torch::Tensor q,torch::Tensor k,torch::Tensor v,torch::Tensor o,
   else if(tile==83) launch<64,128,false,128,3,true>(q,k,v,o,qs,ks,vs,scale);
   else TORCH_CHECK(false,"unsupported experimental tile");
 }
-PYBIND11_MODULE(TORCH_EXTENSION_NAME,m) {m.def("forward", &forward);}
+void transpose_pad_permute_cuda(torch::Tensor, torch::Tensor, int);
+void scale_fuse_quant_cuda(torch::Tensor, torch::Tensor, torch::Tensor, int, float, int);
+PYBIND11_MODULE(TORCH_EXTENSION_NAME,m) {
+  m.def("forward", &forward);
+  m.def("transpose_pad_permute", &transpose_pad_permute_cuda);
+  m.def("scale_fuse_quant", &scale_fuse_quant_cuda);
+}

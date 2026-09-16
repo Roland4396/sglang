@@ -7,11 +7,11 @@ from torch.utils.cpp_extension import load
 from sageattention.core import per_thread_int8_triton,per_channel_fp8,sm90_compile
 
 ROOT=Path(__file__).resolve().parent
-OUT=Path(os.environ.get('H3_TILE_BENCH_OUT','/home/xql/.local/state/gpu-runtime/benchmarks/20260916-operators/tile-bench-v7.json'))
+OUT=Path(os.environ.get('H3_TILE_BENCH_OUT','/home/xql/.local/state/gpu-runtime/benchmarks/20260916-operators/tile-bench-v8.json'))
 os.environ.setdefault('MAX_JOBS','2')
 os.environ['TORCH_CUDA_ARCH_LIST']='9.0a'
 started=time.time()
-module=load(name='h3_sage_tile_20260916_v7',sources=[str(ROOT/'csrc/qattn/h3_tile.cu')],extra_cuda_cflags=['-O3','--use_fast_math','-U__CUDA_NO_HALF_OPERATORS__','-U__CUDA_NO_HALF_CONVERSIONS__','-U__CUDA_NO_BFLOAT16_CONVERSIONS__','-U__CUDA_NO_HALF2_OPERATORS__','--ptxas-options=-v'],extra_ldflags=['-lcuda'],verbose=True)
+module=load(name='h3_sage_tile_20260916_v8',sources=[str(ROOT/'csrc/qattn/h3_tile.cu'),str(ROOT/'csrc/fused/v_quant.cu')],extra_cuda_cflags=['-O3','--use_fast_math','-U__CUDA_NO_HALF_OPERATORS__','-U__CUDA_NO_HALF_CONVERSIONS__','-U__CUDA_NO_BFLOAT16_CONVERSIONS__','-U__CUDA_NO_HALF2_OPERATORS__','--ptxas-options=-v'],extra_ldflags=['-lcuda'],verbose=True)
 print('BUILD_SECONDS',time.time()-started,flush=True)
 rows=[]
 
