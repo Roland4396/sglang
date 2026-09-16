@@ -17,7 +17,10 @@ def once(text, old, new):
     return text.replace(old, new, 1)
 
 
-def generate(root: Path):
+def generate(root: Path, stamp_pair=None):
+    selected = set(range(8)) if stamp_pair is None else set(stamp_pair)
+    if stamp_pair is not None and not (len(stamp_pair) == 2 and 0 <= stamp_pair[0] < stamp_pair[1] < 8):
+        raise ValueError("Expected two ordered timestamp indices from 0 through 7")
     path = root / "csrc/qattn/h3_tile.cu"
     src = path.read_text().split("// Deliberately narrow experimental API:")[0]
     src = re.sub(r'#include "([^"]+)"',
@@ -56,7 +59,7 @@ __device__ __forceinline__ void probe_stamp(unsigned long long *stamps,
     loop = once(loop, "RO[fq][fv][k] += RO_temp[fq][fv][k];",
         "RO[fq][fv][k] = __fmaf_rn(RO[fq][fv][k], deferred_scale[(k % 4) / 2], RO_temp[fq][fv][k]);")
     def stamp(i):
-        return f"    probe_stamp<Profile>(stamps, cta_stride, sample_iter, iter, {i});\n"
+        return f"    probe_stamp<Profile>(stamps, cta_stride, sample_iter, iter, {i});\n" if i in selected else ""
     loop = once(loop, "    p ^= 1;", "    p ^= 1;\n" + stamp(0))
     loop = once(loop, "    wait(&barrier_K, p);", "    wait(&barrier_K, p);\n" + stamp(1))
     loop = once(loop, "    }\n    // load K", "    }\n" + stamp(2) + "    // load K")
@@ -113,5 +116,5 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME,m) {
   m.def("attributes", [](bool profile){return profile ? attributes<1>() : attributes<0>();});
 }
 '''
-    assert src.count("probe_stamp<Profile>(") == 8
+    assert src.count("probe_stamp<Profile>(") == len(selected)
     return src

@@ -19,5 +19,11 @@ class ClockSourceTests(unittest.TestCase):
     def test_ambiguous_source_rejected(self):
         with self.assertRaises(ValueError): once("aaa", "a", "b")
 
+    def test_pair_only_has_two_clock_calls(self):
+        s = generate(Path(__file__).resolve().parent, (0, 7))
+        self.assertEqual(s.count("probe_stamp<Profile>("), 2)
+        for pair in [(7, 0), (0, 8), (3, 3)]:
+            with self.assertRaises(ValueError): generate(Path(__file__).resolve().parent, pair)
+
 
 if __name__ == "__main__": unittest.main()

@@ -18,12 +18,14 @@ from clock_source import generate, PHASES
 parser = argparse.ArgumentParser()
 parser.add_argument("--output-dir", required=True, type=Path)
 parser.add_argument("--repeats", type=int, default=9)
+parser.add_argument("--stamp-pair", nargs=2, type=int, help="Only two markers, for local observer-effect control")
+parser.add_argument("--cta-stride", type=int, default=128)
 args = parser.parse_args()
 root = Path(__file__).resolve().parent
 out = args.output_dir
 out.mkdir(parents=True, exist_ok=True)
 assert not (out / "result.json").exists(), "Choose a new output directory"
-source = generate(root)
+source = generate(root, args.stamp_pair)
 (out / "clock_probe.generated.cu").write_text(source)
 
 import torch
@@ -41,7 +43,9 @@ module = load(name="h3_clock_probe_20260916_v1", sources=[str(out / "clock_probe
                   "-U__CUDA_NO_HALF_OPERATORS__", "-U__CUDA_NO_HALF_CONVERSIONS__",
                   "-U__CUDA_NO_BFLOAT16_CONVERSIONS__", "-U__CUDA_NO_HALF2_OPERATORS__"],
               extra_ldflags=["-lcuda"], verbose=True)
-results = {"build_seconds": time.time() - start, "phases": PHASES,
+results = {"build_seconds": time.time() - start,
+           "phases": PHASES if args.stamp_pair is None else [f"stamp_{args.stamp_pair[0]}_to_{args.stamp_pair[1]}"],
+           "stamp_pair": args.stamp_pair, "cta_stride": args.cta_stride,
            "source_sha256": hashlib.sha256(source.encode()).hexdigest(),
            "installed_binary": _qattn_sm90.__file__, "probe_binary": module.__file__,
            "attributes_order": ["registers_per_thread", "local_bytes_per_thread", "static_shared_bytes", "resident_ctas_per_sm"],
@@ -72,7 +76,7 @@ def prepare(n, heads):
     torch.cuda.synchronize()  # quantization is outside timed/probed attention
     tensors = qi, ki, vi, qs, ks, vs
     buffers = {name: torch.empty_like(q) for name in ("installed", "control", "probe_disabled", "probe_active")}
-    stamps = torch.zeros(math.ceil(math.ceil(n / 64) * heads / 128), 8, device="cuda", dtype=torch.int64)
+    stamps = torch.zeros(math.ceil(math.ceil(n / 64) * heads / args.cta_stride), 8, device="cuda", dtype=torch.int64)
     return tensors, buffers, stamps
 
 
@@ -80,9 +84,9 @@ def funcs(tensors, buffers, stamps, iteration):
     qi, ki, vi, qs, ks, vs = tensors
     return {
         "installed": lambda: sm90_compile.qk_int8_sv_f8_accum_f32_fuse_v_scale_attn_inst_buf(qi, ki, vi, buffers["installed"], qs, ks, vs, 0, 0, 3, 128**-0.5, 0),
-        "control": lambda: module.run(qi, ki, vi, buffers["control"], qs, ks, vs, stamps, 128, iteration, False),
-        "probe_disabled": lambda: module.run(qi, ki, vi, buffers["probe_disabled"], qs, ks, vs, stamps, 128, -1, True),
-        "probe_active": lambda: module.run(qi, ki, vi, buffers["probe_active"], qs, ks, vs, stamps, 128, iteration, True),
+        "control": lambda: module.run(qi, ki, vi, buffers["control"], qs, ks, vs, stamps, args.cta_stride, iteration, False),
+        "probe_disabled": lambda: module.run(qi, ki, vi, buffers["probe_disabled"], qs, ks, vs, stamps, args.cta_stride, -1, True),
+        "probe_active": lambda: module.run(qi, ki, vi, buffers["probe_active"], qs, ks, vs, stamps, args.cta_stride, iteration, True),
     }
 
 
@@ -111,6 +115,7 @@ with torch.inference_mode():
                 results["numerical_failure"] = failure
                 save()
                 print("NUMERICAL_FAILURE", json.dumps(failure), flush=True)
+                raise AssertionError((n, name, "numerical mismatch; diagnostic recorded"))
             assert torch.equal(value, buffers["installed"]), (n, name, "numerical mismatch")
         stream = torch.cuda.Stream()
         stream.wait_stream(torch.cuda.current_stream())
@@ -148,11 +153,11 @@ with torch.inference_mode():
         for repeat in range(2):
             stamps.zero_()
             funcs(tensors, buffers, stamps, iteration)["probe_active"]()
-            clocks = stamps.cpu()
+            clocks = stamps.cpu()[:, args.stamp_pair or list(range(8))]
             assert (clocks > 0).all().item(), "Missing stamps"
             differences = clocks[:, 1:] - clocks[:, :-1]
             assert (differences > 0).all().item(), "Nonmonotonic clock samples"
-            row = {"iteration": iteration, "repeat": repeat, "cta_stride": 128,
+            row = {"iteration": iteration, "repeat": repeat, "cta_stride": args.cta_stride,
                    "elapsed_cycles": differences.tolist(),
                    "median_cycles": differences.double().median(dim=0).values.tolist()}
             results["samples"].append(row)
