@@ -3,6 +3,8 @@
 # SPDX-License-Identifier: Apache-2.0
 
 
+import os
+
 import torch
 from sageattention import sageattn
 
@@ -68,6 +70,11 @@ class SageAttentionImpl(AttentionImpl):
         self.causal = causal
         self.softmax_scale = softmax_scale
         self.dropout = extra_impl_args.get("dropout_p", 0.0)
+        tile = os.environ.get("SGLANG_H3_SAGE_CANARY_TILE", "").strip()
+        if tile and tile not in ("71", "81", "82", "83"):
+            raise ValueError("SGLANG_H3_SAGE_CANARY_TILE must be 71, 81, 82 or 83")
+        self.canary_tile = int(tile) if tile else None
+        self._canary_logged = False
 
     def forward(
         self,
@@ -78,6 +85,22 @@ class SageAttentionImpl(AttentionImpl):
         *,
         return_softmax_lse: bool = False,
     ) -> torch.Tensor:
+        if self.canary_tile is not None:
+            from . import h3_sage_canary
+
+            supported = h3_sage_canary.supports(
+                query, key, value, is_causal=self.causal,
+                return_lse=return_softmax_lse,
+            )
+            if not self._canary_logged:
+                logger.warning("H3 Sage kernel canary tile=%s supported=%s shape=%s",
+                               self.canary_tile, supported, tuple(query.shape))
+                self._canary_logged = True
+            if supported:
+                return h3_sage_canary.forward(
+                    query, key, value, sm_scale=self.softmax_scale,
+                    tile=self.canary_tile,
+                )
         output = sageattn(
             query,
             key,
