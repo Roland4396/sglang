@@ -7,8 +7,8 @@ from pathlib import Path
 import re
 
 PHASES = ["k_scale_and_ready", "qk_mma_and_wait", "k_prefetch_issue",
-          "softmax_rescale_and_fp8", "v_ready_wait", "pv_mma_and_wait",
-          "output_accumulate_and_v_prefetch"]
+          "softmax_denominator_and_fp8", "v_ready_wait", "pv_mma_and_wait",
+          "output_rescale_accumulate_and_v_prefetch"]
 
 
 def once(text, old, new):
@@ -43,6 +43,18 @@ __device__ __forceinline__ void probe_stamp(unsigned long long *stamps,
     a, rest = src.split("  int p = 1;", 1)
     loop, tail = rest.split("\n  }\n\n  { \n    p ^= 1;", 1)
     loop += "\n  }"
+    # SASS inspection showed the original compiler contracts the output rescale
+    # and PV addition to 64 FFMAs. Clock branches inhibited that contraction,
+    # producing 64 extra FMULs/FADDs and a reproducible numerical mismatch.
+    # Spell out the original fused operation in BOTH control and probe rather
+    # than weakening the bitwise comparison or timing altered arithmetic.
+    loop = once(loop,
+        "update_mdo<1, num_tiles_k, num_tiles_v, false, true, false>(\n"
+        "          RS_f32 + fq, RO + fq, m + fq, d + fq, tile_sm_scale);",
+        "update_mdo<1, num_tiles_k, num_tiles_v, false, true, false, true>(\n"
+        "          RS_f32 + fq, RO + fq, m + fq, d + fq, tile_sm_scale, deferred_scale);")
+    loop = once(loop, "RO[fq][fv][k] += RO_temp[fq][fv][k];",
+        "RO[fq][fv][k] = __fmaf_rn(RO[fq][fv][k], deferred_scale[(k % 4) / 2], RO_temp[fq][fv][k]);")
     def stamp(i):
         return f"    probe_stamp<Profile>(stamps, cta_stride, sample_iter, iter, {i});\n"
     loop = once(loop, "    p ^= 1;", "    p ^= 1;\n" + stamp(0))

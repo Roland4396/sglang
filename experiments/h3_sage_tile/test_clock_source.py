@@ -13,6 +13,8 @@ class ClockSourceTests(unittest.TestCase):
         self.assertIn("int Profile=0>", s)
         self.assertIn("cudaOccupancyMaxActiveBlocksPerMultiprocessor", s)
         self.assertNotIn("m.def(\"forward\"", s)
+        self.assertEqual(loop.count("__fmaf_rn(RO[fq][fv][k]"), 1)
+        self.assertIn("tile_sm_scale, deferred_scale);", loop)
 
     def test_ambiguous_source_rejected(self):
         with self.assertRaises(ValueError): once("aaa", "a", "b")
