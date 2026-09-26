@@ -35,7 +35,7 @@ class MiniMaxH3LatentPreparationStage(PipelineStage):
         batches: list[Req],
         server_args: ServerArgs,
     ) -> list[Req]:
-        """Preserve H3's independent per-modality RNG streams per request."""
+        """Preserve each request's selected RNG layout and seed."""
         return [self(batch, server_args) for batch in batches]
 
     @staticmethod
@@ -64,10 +64,11 @@ class MiniMaxH3LatentPreparationStage(PipelineStage):
         batch.raw_audio_latent_shape = (2, 32, audio_t)
 
     def _prepare_denoise_state_from_plan(self, batch: Req, plan) -> None:
-        """Direct initial-noise materialization (t2va recipe):
-        torch.Generator().manual_seed(seed); video rows drawn first,
-        then audio rows, CPU fp32. Every task consumes the final latent grid
-        frozen by the pre-queue shape resolver."""
+        """Materialize CPU fp32 noise using the request's explicit layout.
+
+        Every task consumes the final latent grid frozen by pre-queue admission.
+        The native recipe remains unchanged; Comfy AV ordering is opt-in.
+        """
         from sglang.multimodal_gen.runtime.pipelines_core.stages.model_specific_stages.minimax_h3.constants import (
             MINIMAX_H3_DENOISE_STATE_EXTRA_KEY,
         )
@@ -96,7 +97,7 @@ class MiniMaxH3LatentPreparationStage(PipelineStage):
             seed = 42  # pinned default seed
         video_rows_n = latent_t * (latent_h // 2) * (latent_w // 2)
         audio_rows_n = audio_t * 2
-        # Noise semantics:
+        # Existing native noise semantics (comfy_av overrides the draw order):
         # - video noise is drawn on the RAW latent tensor
         #   [1, 24, T, H_lat, W_lat] in tensor layout, then patchified
         #   into packed row order;
@@ -109,23 +110,32 @@ class MiniMaxH3LatentPreparationStage(PipelineStage):
             minimax_h3_patchify_video_latent,
         )
 
-        gen_v = torch.Generator().manual_seed(int(seed))
-        video_tensor = torch.randn(
-            1,
-            24,
-            latent_t,
-            latent_h,
-            latent_w,
-            generator=gen_v,
-            dtype=torch.float32,
-        )
+        if plan.noise_layout == "comfy_av":
+            from ..comfy_noise import comfy_av_initial_noise
+
+            video_tensor, audio_noise = comfy_av_initial_noise(
+                seed=int(seed),
+                video_shape=(1, 24, latent_t, latent_h, latent_w),
+                audio_t=audio_t,
+            )
+        else:
+            gen_v = torch.Generator().manual_seed(int(seed))
+            video_tensor = torch.randn(
+                1,
+                24,
+                latent_t,
+                latent_h,
+                latent_w,
+                generator=gen_v,
+                dtype=torch.float32,
+            )
+            gen_a = torch.Generator().manual_seed(int(seed))
+            audio_noise = torch.randn(
+                audio_rows_n, 32, generator=gen_a, dtype=torch.float32
+            )
         video_noise = minimax_h3_patchify_video_latent(
             video_tensor, patch_size=[1, 2, 2]
         ).to(torch.float32)
-        gen_a = torch.Generator().manual_seed(int(seed))
-        audio_noise = torch.randn(
-            audio_rows_n, 32, generator=gen_a, dtype=torch.float32
-        )
         if list(video_noise.shape) != [video_rows_n, 96]:
             raise ValueError(
                 f"aligned video noise shape {list(video_noise.shape)} != "

@@ -283,6 +283,8 @@ def minimax_h3_validate_canonical_request(
     target: Any,
     flow_shift: Any = None,
     audio_flow_shift: Any = None,
+    sigma_schedule: Any = None,
+    noise_layout: Any = None,
     seed: Any = None,
     **_extra_kwargs: Any,
 ) -> dict[str, Any]:
@@ -366,6 +368,14 @@ def minimax_h3_validate_canonical_request(
         canonical["flow_shift"] = normalized_flow_shift
     if normalized_audio_flow_shift is not None:
         canonical["audio_flow_shift"] = normalized_audio_flow_shift
+    if noise_layout is not None:
+        from .comfy_noise import normalize_noise_layout
+
+        canonical["noise_layout"] = normalize_noise_layout(noise_layout)
+    if sigma_schedule is not None:
+        from .comfy_schedule import normalize_sigma_schedule
+
+        canonical["sigma_schedule"] = normalize_sigma_schedule(sigma_schedule)
     if seed is not None:
         normalized_seed = _require_int(seed, "seed")
         if normalized_seed < 0:

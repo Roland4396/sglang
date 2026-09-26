@@ -52,6 +52,8 @@ def _replace_plan_shape(
         default_audio_flow_shift=plan.default_audio_flow_shift,
         flow_shift=plan.flow_shift,
         audio_flow_shift=plan.audio_flow_shift,
+        sigma_schedule=plan.sigma_schedule,
+        noise_layout=plan.noise_layout,
         shape=shape,
         condition_mask=plan.condition_mask,
     )

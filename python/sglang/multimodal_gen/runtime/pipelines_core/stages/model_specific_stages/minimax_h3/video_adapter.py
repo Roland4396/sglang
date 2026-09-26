@@ -58,6 +58,8 @@ class MiniMaxH3VideoModelAdapter:
             "conditions",
             "target",
             "audio_flow_shift",
+            "sigma_schedule",
+            "noise_layout",
             "audio_guidance_scale",
             "quality",
             "output_mode",
@@ -175,6 +177,8 @@ class MiniMaxH3VideoModelAdapter:
                 "task": canonical_minimax_h3_task(
                     _parse_extra_value(_extra_value(request, "task"))
                 ),
+                "sigma_schedule": _extra_value(request, "sigma_schedule"),
+                "noise_layout": _extra_value(request, "noise_layout"),
                 "conditions": _parse_extra_value(_extra_value(request, "conditions")),
                 "target": _parse_extra_value(_extra_value(request, "target")),
                 "imgvid_cond_noise_aug_for_inference": _parse_extra_value(
@@ -199,6 +203,12 @@ class MiniMaxH3VideoModelAdapter:
         self.validate_task_gate(extras.get("task"), provided="task" in extras)
         del model_path
         self._positive_finite_extra(request, "audio_flow_shift")
+        from .comfy_noise import normalize_noise_layout
+        from .comfy_schedule import normalize_sigma_schedule
+
+        normalize_noise_layout(_extra_value(request, "noise_layout"))
+
+        normalize_sigma_schedule(_extra_value(request, "sigma_schedule"))
         if _extra_value(request, "audio_guidance_scale") is not None:
             raise ValueError(
                 "audio_guidance_scale is not supported: MiniMax H3 serves only "

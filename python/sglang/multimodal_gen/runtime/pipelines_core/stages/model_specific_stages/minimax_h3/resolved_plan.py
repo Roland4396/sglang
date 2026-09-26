@@ -74,6 +74,8 @@ class MiniMaxH3ResolvedPlan(msgspec.Struct, frozen=True):
     audio_flow_shift: float | None
     shape: dict
     condition_mask: dict
+    sigma_schedule: str = "native"
+    noise_layout: str = "native"
 
 
 def _parse_aspect_ratio(value: str) -> tuple[int, int]:
@@ -268,6 +270,8 @@ def minimax_h3_resolve_plan(canonical: Mapping[str, Any]) -> MiniMaxH3ResolvedPl
         "seed",
         "flow_shift",
         "audio_flow_shift",
+        "sigma_schedule",
+        "noise_layout",
     }
     unknown = set(canonical) - allowed_keys
     if unknown:
@@ -275,6 +279,12 @@ def minimax_h3_resolve_plan(canonical: Mapping[str, Any]) -> MiniMaxH3ResolvedPl
     for key in ("schema", "task", "prompt", "conditions", "target"):
         if key not in canonical:
             raise ValueError(f"canonical request missing {key!r}")
+    from .comfy_noise import normalize_noise_layout
+    from .comfy_schedule import normalize_sigma_schedule
+
+    noise_layout = normalize_noise_layout(canonical.get("noise_layout"))
+
+    sigma_schedule = normalize_sigma_schedule(canonical.get("sigma_schedule"))
     profile = minimax_h3_task_profile(str(canonical["task"]))
     conditions = canonical["conditions"]
     keyframe_conditions = (
@@ -403,6 +413,8 @@ def minimax_h3_resolve_plan(canonical: Mapping[str, Any]) -> MiniMaxH3ResolvedPl
         materials=tuple(materials),
         encoders=encoders,
         branches=profile.branches,
+        sigma_schedule=sigma_schedule,
+        noise_layout=noise_layout,
         default_flow_shift=float(profile.default_flow_shift),
         default_audio_flow_shift=float(profile.default_audio_flow_shift),
         flow_shift=(

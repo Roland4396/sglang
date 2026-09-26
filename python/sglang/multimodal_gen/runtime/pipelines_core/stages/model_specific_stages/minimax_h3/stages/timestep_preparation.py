@@ -60,6 +60,7 @@ class MiniMaxH3TimestepPreparationStage(PipelineStage):
             batch.num_inference_steps,
             plan.flow_shift,
             plan.audio_flow_shift,
+            plan.sigma_schedule,
             plan.default_flow_shift,
             plan.default_audio_flow_shift,
             self.freeze_for_dedup(self.sigma_shift_scales),
@@ -151,6 +152,15 @@ class MiniMaxH3TimestepPreparationStage(PipelineStage):
                 task_default=plan.default_audio_flow_shift,
             ),
         }
+        if plan.sigma_schedule == "comfy_beta":
+            from ..comfy_schedule import comfy_beta_av_sigmas
+
+            batch.extra[MINIMAX_H3_SIGMAS_EXTRA_KEY] = comfy_beta_av_sigmas(
+                num_steps=requested_num_steps - 1,
+                video_shift=scales["video"],
+                audio_shift=scales["audio"],
+            )
+            return
         sigmas: dict[str, list[float]] = {}
         for modality in ("video", "audio"):
             sigmas[modality] = minimax_h3_time_shift_sigmas(

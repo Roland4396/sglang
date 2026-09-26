@@ -53,6 +53,8 @@ class MiniMaxH3SamplingParams(SamplingParams):
     conditions: list[dict[str, Any]] | None = None
     target: dict[str, Any] | None = None
     audio_flow_shift: float | None = None
+    sigma_schedule: str | None = None
+    noise_layout: str | None = None
     output_mode: str | None = field(
         default=None,
         metadata={"batch_sig_exclude": True},
@@ -66,6 +68,8 @@ class MiniMaxH3SamplingParams(SamplingParams):
                 "conditions",
                 "target",
                 "audio_flow_shift",
+                "sigma_schedule",
+                "noise_layout",
                 "audio_guidance_scale",
                 "quality",
                 "output_mode",
@@ -264,6 +268,8 @@ class MiniMaxH3SamplingParams(SamplingParams):
                     target=self.target,
                     flow_shift=self.flow_shift,
                     audio_flow_shift=self.audio_flow_shift,
+                    sigma_schedule=self.sigma_schedule,
+                    noise_layout=self.noise_layout,
                     seed=(
                         _seed_override
                         if _seed_override is not None
@@ -276,10 +282,12 @@ class MiniMaxH3SamplingParams(SamplingParams):
             or self.target is not None
             or self.flow_shift is not None
             or self.audio_flow_shift is not None
+            or self.sigma_schedule is not None
+            or self.noise_layout is not None
         ):
             raise ValueError(
                 "task is required when conditions/target/flow_shift/"
-                "audio_flow_shift are provided"
+                "audio_flow_shift/sigma_schedule/noise_layout are provided"
             )
         return extra
 
