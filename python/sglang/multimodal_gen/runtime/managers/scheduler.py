@@ -2,6 +2,7 @@
 
 # SPDX-License-Identifier: Apache-2.0
 import dataclasses
+import os
 import pickle
 import time
 from collections import deque
@@ -157,6 +158,15 @@ class Scheduler(SchedulerWarmupMixin, SchedulerPostTrainingMixin, SchedulerDisag
             ReleaseMemoryOccupationReqInput: self._handle_release_memory_occupation,
             ResumeMemoryOccupationReqInput: self._handle_resume_memory_occupation,
         }
+
+        # Optional original-Comfy compute adapter. Disabled unless the node's
+        # explicit deployment manifest selects it; native video requests and
+        # scheduling/TP/SP transport are unchanged. No user graph conversion.
+        if original_manifest := os.environ.get("SGLANG_H3_ORIGINAL_MANIFEST"):
+            from h3_original_bootstrap import worker_executor_factory
+            from h3_original_dispatch import install_scheduler_handler
+
+            install_scheduler_handler(self, worker_executor_factory(original_manifest))
 
         # FIFO queue entries: (identity, request, enqueue_ts_s)
         self.waiting_queue: deque[tuple[bytes | None, Any, float]] = deque()
