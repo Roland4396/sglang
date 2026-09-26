@@ -196,7 +196,7 @@ def _validate_conditions(
             MINIMAX_H3_CONDITION_ROLE_REFERENCE,
         ):
             raise ValueError(
-                f"{cpath}.role must be keyframe or reference, " f"got {role!r}"
+                f"{cpath}.role must be keyframe or reference, got {role!r}"
             )
         cond_type = _require_str(cond.get("type"), f"{cpath}.type")
         try:
@@ -285,6 +285,7 @@ def minimax_h3_validate_canonical_request(
     audio_flow_shift: Any = None,
     sigma_schedule: Any = None,
     noise_layout: Any = None,
+    conditioning_profile: Any = None,
     seed: Any = None,
     **_extra_kwargs: Any,
 ) -> dict[str, Any]:
@@ -303,7 +304,14 @@ def minimax_h3_validate_canonical_request(
     profile = minimax_h3_task_profile(task_name)
     prompt_text = _require_str(prompt, "prompt")
 
+    from .comfy_conditioning import normalize_conditioning_profile, comfy_target_canvas
+
+    conditioning_profile = normalize_conditioning_profile(conditioning_profile)
     normalized_target = _validate_target(target, profile=profile)
+    if conditioning_profile == "comfy_t8_match":
+        if task_name not in {"ref2va", "t2va"}:
+            raise ValueError("comfy_t8_match supports first-stage t2va/ref2va only")
+        normalized_target.update(comfy_target_canvas(target))
     requested_frame_count = None
     if normalized_target.get("duration_seconds") is not None:
         requested_frame_count = int(
@@ -316,6 +324,13 @@ def minimax_h3_validate_canonical_request(
         profile=profile,
         frame_count=requested_frame_count,
     )
+    if conditioning_profile == "comfy_t8_match" and any(
+        c["role"] != "reference" or c["type"] not in {"image", "audio"}
+        for c in normalized_conditions
+    ):
+        raise ValueError(
+            "comfy_t8_match currently supports image/audio references only"
+        )
     if profile.task == MINIMAX_H3_TASK_FL2VA:
         _validate_keyframe_conditions(normalized_conditions, task=profile.task)
     elif profile.task == MINIMAX_H3_TASK_REF2VA and any(
@@ -360,6 +375,8 @@ def minimax_h3_validate_canonical_request(
         "conditions": normalized_conditions,
         "target": normalized_target,
     }
+    if conditioning_profile != "native":
+        canonical["conditioning_profile"] = conditioning_profile
     normalized_flow_shift = _optional_positive_finite_float(flow_shift, "flow_shift")
     normalized_audio_flow_shift = _optional_positive_finite_float(
         audio_flow_shift, "audio_flow_shift"

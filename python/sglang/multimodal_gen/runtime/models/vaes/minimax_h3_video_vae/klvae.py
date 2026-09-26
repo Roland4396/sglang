@@ -921,6 +921,7 @@ class AutoencoderKL(ModelMixin, ConfigMixin, FromOriginalModelMixin):
         transform_input: bool = False,
         use_fp16_latent: bool = False,
         verbose: bool = False,
+        use_mean: bool = False,
     ) -> List[torch.Tensor]:
         """encode images into latents
 
@@ -979,7 +980,11 @@ class AutoencoderKL(ModelMixin, ConfigMixin, FromOriginalModelMixin):
             stacked = torch.cat(prepared, dim=0)
             if verbose:
                 logger.info(f"batch encode input shape {tuple(stacked.shape)}")
-            all_latents = self.encode_base(stacked, True)
+            all_latents = (
+                self.encode_base(stacked, True, use_mean=True)
+                if use_mean
+                else self.encode_base(stacked, True)
+            )
             image_latents = [
                 all_latents[i].contiguous() for i in range(all_latents.shape[0])
             ]
@@ -988,7 +993,11 @@ class AutoencoderKL(ModelMixin, ConfigMixin, FromOriginalModelMixin):
             for image_tensor in prepared:
                 if verbose:
                     logger.info(f"input shape {tuple(image_tensor.shape)}")
-                image_latent = self.encode_base(image_tensor, True)
+                image_latent = (
+                    self.encode_base(image_tensor, True, use_mean=True)
+                    if use_mean
+                    else self.encode_base(image_tensor, True)
+                )
                 image_latents.append(image_latent.squeeze(0).contiguous())
 
         if use_fp16_latent:
@@ -1291,7 +1300,7 @@ class AutoencoderKLLegacy(AutoencoderKL):
             return self.decoder(z2)
         return self.decoder(z2, z)
 
-    def encode_base(self, input, process_image=False):
+    def encode_base(self, input, process_image=False, *, use_mean=False):
         if self.use_3d_conv and input.ndim == 4:
             input = input.unsqueeze(2)
 
@@ -1300,7 +1309,13 @@ class AutoencoderKLLegacy(AutoencoderKL):
         else:
             moments = self.encode_temporal(input)
 
-        z = DiagonalGaussianDistribution(moments).sample()
+        # Comfy H3 uses the posterior mean in float32, not a seed-42 sample.
+        # Native SGLang callers retain the sampled posterior by default.
+        z = (
+            torch.chunk(moments.float(), 2, dim=1)[0]
+            if use_mean
+            else DiagonalGaussianDistribution(moments).sample()
+        )
 
         if process_image and self.use_3d_conv:
             z = self.trim_code(z, 1)

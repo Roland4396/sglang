@@ -76,6 +76,7 @@ class MiniMaxH3ResolvedPlan(msgspec.Struct, frozen=True):
     condition_mask: dict
     sigma_schedule: str = "native"
     noise_layout: str = "native"
+    conditioning_profile: str = "native"
 
 
 def _parse_aspect_ratio(value: str) -> tuple[int, int]:
@@ -233,6 +234,22 @@ def _resolve_spatial(
     auto_aspect_ratio: str | None,
     auto_geometry_source: str | None,
 ) -> dict[str, Any]:
+    if "width" in target and "height" in target:
+        from .comfy_conditioning import comfy_target_canvas
+
+        canvas = comfy_target_canvas(target)
+        shape.update(canvas)
+        shape.update(
+            geometry="resolved_v2",
+            shape_policy_version="comfy_explicit_v1",
+            geometry_source="explicit_canvas",
+            multiple=32,
+            rounding="none",
+            size_mode="explicit",
+            base_short_edge=min(canvas.values()),
+            effective_short_edge=min(canvas.values()),
+        )
+        return shape
     aspect_ratio = str(target["aspect_ratio"])
     base_short_edge = _validate_base_short_edge(target.get("short_edge"))
     if aspect_ratio == "auto":
@@ -272,6 +289,7 @@ def minimax_h3_resolve_plan(canonical: Mapping[str, Any]) -> MiniMaxH3ResolvedPl
         "audio_flow_shift",
         "sigma_schedule",
         "noise_layout",
+        "conditioning_profile",
     }
     unknown = set(canonical) - allowed_keys
     if unknown:
@@ -415,6 +433,7 @@ def minimax_h3_resolve_plan(canonical: Mapping[str, Any]) -> MiniMaxH3ResolvedPl
         branches=profile.branches,
         sigma_schedule=sigma_schedule,
         noise_layout=noise_layout,
+        conditioning_profile=canonical.get("conditioning_profile", "native"),
         default_flow_shift=float(profile.default_flow_shift),
         default_audio_flow_shift=float(profile.default_audio_flow_shift),
         flow_shift=(

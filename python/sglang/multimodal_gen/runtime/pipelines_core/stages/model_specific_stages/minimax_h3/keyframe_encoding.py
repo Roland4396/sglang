@@ -115,6 +115,8 @@ def minimax_h3_encode_keyframe_cond_rows(
     video_vae: Any,
     image: Any,
     arch_config: MiniMaxH3VideoVAEArchConfig,
+    *,
+    use_mean: bool = False,
 ) -> torch.Tensor:
     """Encode a target-canvas PIL image into packed imgvid cond rows.
 
@@ -129,7 +131,12 @@ def minimax_h3_encode_keyframe_cond_rows(
         video_vae.to(torch.float32)
     try:
         with minimax_h3_scoped_encode_rng(seed, parameter.device):
-            z = video_vae.encode_images(image, use_fp16_latent=True)[0]
+            if use_mean:
+                z = video_vae.encode_images(
+                    image, use_fp16_latent=False, use_mean=True
+                )[0]
+            else:
+                z = video_vae.encode_images(image, use_fp16_latent=True)[0]
     finally:
         if prev_dtype != torch.float32:
             video_vae.to(prev_dtype)

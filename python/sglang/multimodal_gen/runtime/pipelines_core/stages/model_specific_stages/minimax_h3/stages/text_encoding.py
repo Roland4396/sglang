@@ -107,6 +107,7 @@ class MiniMaxH3TextEncodingStage(TextEncodingStage):
         )
         return (
             plan.task,
+            plan.conditioning_profile,
             plan.prompt,
             materials,
             self.freeze_for_dedup(plan.shape),
@@ -481,7 +482,12 @@ class MiniMaxH3TextEncodingStage(TextEncodingStage):
             prepared = minimax_h3_prepared_reference_image(batch, plan)
             images = [item["image"] for item in prepared["images"]]
             proc = processor
-            vision = proc.image_processor(images=images, return_tensors="pt")
+            if plan.conditioning_profile == "comfy_t8_match":
+                from ..comfy_conditioning import comfy_qwen_image_inputs
+
+                vision = comfy_qwen_image_inputs(images)
+            else:
+                vision = proc.image_processor(images=images, return_tensors="pt")
             pixel_values = vision["pixel_values"]
             image_grid_thw = vision["image_grid_thw"]
             if int(image_grid_thw.shape[0]) != len(images):

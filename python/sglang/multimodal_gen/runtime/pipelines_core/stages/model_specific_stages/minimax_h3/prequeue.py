@@ -54,6 +54,7 @@ def _replace_plan_shape(
         audio_flow_shift=plan.audio_flow_shift,
         sigma_schedule=plan.sigma_schedule,
         noise_layout=plan.noise_layout,
+        conditioning_profile=plan.conditioning_profile,
         shape=shape,
         condition_mask=plan.condition_mask,
     )
@@ -311,10 +312,20 @@ def minimax_h3_prepare_for_queue(batch: Any) -> MiniMaxH3ResolvedPlan:
                     minimax_h3_resolve_reference_image_shape,
                 )
 
-                resolved = minimax_h3_resolve_reference_image_shape(
-                    width=width,
-                    height=height,
-                )
+                if plan.conditioning_profile == "comfy_t8_match":
+                    from .comfy_conditioning import comfy_match_reference_shape
+
+                    resolved = comfy_match_reference_shape(
+                        width=width,
+                        height=height,
+                        target_width=int(shape["width"]),
+                        target_height=int(shape["height"]),
+                    )
+                else:
+                    resolved = minimax_h3_resolve_reference_image_shape(
+                        width=width,
+                        height=height,
+                    )
             else:
                 continue
             resolved = dict(resolved)

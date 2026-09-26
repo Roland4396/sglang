@@ -346,6 +346,11 @@ class MiniMaxH3VisualEncodingStage(ConditionEncodingStage):
                 self.video_vae,
                 image,
                 self.vae_arch_config,
+                **(
+                    {"use_mean": True}
+                    if plan.conditioning_profile == "comfy_t8_match"
+                    else {}
+                ),
             )
             width, height = image.size
             entries.append(

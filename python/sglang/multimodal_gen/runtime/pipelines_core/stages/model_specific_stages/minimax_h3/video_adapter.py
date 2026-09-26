@@ -60,6 +60,7 @@ class MiniMaxH3VideoModelAdapter:
             "audio_flow_shift",
             "sigma_schedule",
             "noise_layout",
+            "conditioning_profile",
             "audio_guidance_scale",
             "quality",
             "output_mode",
@@ -72,8 +73,7 @@ class MiniMaxH3VideoModelAdapter:
     def validate_task_gate(self, task: Any, *, provided: bool) -> None:
         if not provided or task is None:
             raise ValueError(
-                "task is required for MiniMax H3; supported tasks: "
-                "fl2va, ref2va, t2va"
+                "task is required for MiniMax H3; supported tasks: fl2va, ref2va, t2va"
             )
         if not isinstance(task, str):
             raise ValueError("task must be a non-empty string for MiniMax H3")
@@ -179,6 +179,7 @@ class MiniMaxH3VideoModelAdapter:
                 ),
                 "sigma_schedule": _extra_value(request, "sigma_schedule"),
                 "noise_layout": _extra_value(request, "noise_layout"),
+                "conditioning_profile": _extra_value(request, "conditioning_profile"),
                 "conditions": _parse_extra_value(_extra_value(request, "conditions")),
                 "target": _parse_extra_value(_extra_value(request, "target")),
                 "imgvid_cond_noise_aug_for_inference": _parse_extra_value(

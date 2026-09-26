@@ -63,7 +63,7 @@ class MiniMaxH3ReleaseMetadata:
         partition = raw.get("partition")
         if partition not in {"fl2va", "ref2va"}:
             raise ValueError(
-                "model_index.json._minimax_h3.partition must be one of " "fl2va, ref2va"
+                "model_index.json._minimax_h3.partition must be one of fl2va, ref2va"
             )
         tasks = _string_list(raw.get("tasks"), "model_index.json._minimax_h3.tasks")
         aliases = raw.get("task_aliases", {})
@@ -146,7 +146,29 @@ class MiniMaxH3PartitionAdmissionStage(PipelineStage):
         task = None if batch.sampling_params is None else batch.sampling_params.task
         if not isinstance(task, str) or not task.strip():
             raise ValueError("MiniMax H3 request task must be a non-empty string")
-        self.metadata.canonical_task(task)
+        plan = minimax_h3_plan_from_batch(batch)
+        if plan is not None and plan.conditioning_profile == "comfy_t8_match":
+            import os
+
+            # This opt-in deliberately reproduces the author's FL2VA-base
+            # reference workflow, NOT the official Ref2VA checkpoint route.
+            # An unconfigured worker must reject it rather than use wrong weights.
+            if os.environ.get("SGLANG_H3_AUTHOR_CONTRACT") != "comfy_t8_v1":
+                raise ValueError(
+                    "comfy_t8_match requires the dedicated author-contract deployment"
+                )
+            if self.metadata.partition != "fl2va" or task not in {"t2va", "ref2va"}:
+                raise ValueError(
+                    "author contract requires FL2VA weights for first-stage t2va/ref2va"
+                )
+            if plan.sigma_schedule != "comfy_beta" or plan.noise_layout != "comfy_av":
+                raise ValueError("author contract requires comfy_beta and comfy_av")
+            if getattr(batch.sampling_params, "quality", None) != "lossless":
+                raise ValueError(
+                    "author contract requires lossless (no cached denoising)"
+                )
+        else:
+            self.metadata.canonical_task(task)
         if batch.num_inference_steps < 2:
             raise ValueError(
                 "MiniMax H3 requires num_inference_steps >= 2 because its "

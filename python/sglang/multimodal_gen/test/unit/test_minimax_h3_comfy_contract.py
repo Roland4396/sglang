@@ -93,3 +93,35 @@ def test_invalid_schedule_fails_before_sampling(steps, shift):
         schedule.comfy_beta_av_sigmas(
             num_steps=steps, video_shift=shift, audio_shift=3.0
         )
+
+
+conditioning = _module("comfy_conditioning")
+
+
+def test_comfy_reference_resize_does_not_upscale_small_inputs():
+    small = conditioning.comfy_match_reference_shape(
+        width=320, height=192, target_width=832, target_height=480
+    )
+    assert (small["width"], small["height"]) == (320, 192)
+    large = conditioning.comfy_match_reference_shape(
+        width=3840, height=2160, target_width=832, target_height=480
+    )
+    assert (large["width"], large["height"]) == (832, 480)
+
+
+def test_comfy_explicit_canvas_not_aspect_reestimated():
+    assert conditioning.comfy_target_canvas({"width": 832, "height": 480}) == {
+        "width": 832,
+        "height": 480,
+    }
+    assert conditioning.normalize_conditioning_profile(None) == "native"
+    with pytest.raises(ValueError):
+        conditioning.comfy_target_canvas({"width": 833, "height": 480})
+
+
+def test_author_reference_audio_keeps_full_duration():
+    assert (
+        conditioning.reference_audio_duration_limit("comfy_t8_match", "audio", 4.0)
+        is None
+    )
+    assert conditioning.reference_audio_duration_limit("native", "audio", 4.0) == 4.0

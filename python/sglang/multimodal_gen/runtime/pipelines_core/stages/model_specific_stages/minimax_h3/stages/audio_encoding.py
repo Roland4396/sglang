@@ -143,6 +143,8 @@ class MiniMaxH3AudioEncodingStage(ConditionEncodingStage):
 
         if not materials:
             raise ValueError("ref2va audio routing selected no reference materials")
+        from ..comfy_conditioning import reference_audio_duration_limit
+
         entries = []
         max_duration_seconds = (
             float(plan.shape["frame_count"]) / float(plan.shape["fps"])
@@ -188,7 +190,11 @@ class MiniMaxH3AudioEncodingStage(ConditionEncodingStage):
                         audio_path,
                         self.vae_arch_config,
                         material_chain=material_chain,
-                        max_duration_seconds=max_duration_seconds,
+                        max_duration_seconds=reference_audio_duration_limit(
+                            plan.conditioning_profile,
+                            material_chain,
+                            max_duration_seconds,
+                        ),
                         start_time_seconds=float(material.start_time_seconds),
                         source_sample_rate=(
                             int(source_facts["audio_sample_rate"])
