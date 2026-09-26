@@ -441,6 +441,9 @@ class ServerArgs(DisaggServerArgsMixin):
     webui_port: int | None = 12312
 
     scheduler_port: int = 5555
+    # Optional same-host Unix ingress. Keeps private original-node tensor/object
+    # RPC off TCP while preserving the existing scheduler client and TP/SP relay.
+    scheduler_ipc_path: str | None = None
     # settled ingress ports, one per DP replica; None until ports are settled
     scheduler_ports: list[int] | None = None
     batching_mode: str = "dynamic"
@@ -2522,6 +2525,12 @@ class ServerArgs(DisaggServerArgsMixin):
             help="Port for the scheduler server.",
         )
         parser.add_argument(
+            "--scheduler-ipc-path",
+            type=str,
+            default=None,
+            help="Absolute private Unix socket path for same-host scheduler ingress; replaces scheduler TCP ingress.",
+        )
+        parser.add_argument(
             "--batching-mode",
             type=str,
             default=ServerArgs.batching_mode,
@@ -2778,6 +2787,11 @@ class ServerArgs(DisaggServerArgsMixin):
 
     def scheduler_endpoint_for(self, replica: int) -> str:
         """Ingress endpoint of one DP replica's driver rank."""
+        if self.scheduler_ipc_path:
+            path = self.scheduler_ipc_path
+            if not os.path.isabs(path):
+                raise ValueError("scheduler_ipc_path must be absolute")
+            return f"ipc://{path}" if replica == 0 else f"ipc://{path}.dp{replica}"
         scheduler_host = self.host
         if scheduler_host is None or scheduler_host == "localhost":
             scheduler_host = "127.0.0.1"
